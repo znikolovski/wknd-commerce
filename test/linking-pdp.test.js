@@ -115,6 +115,27 @@ describe('PDP markup', () => {
     expect(html).not.toMatch(/<script/i);
   });
 
+  test('everything a shopper sees is in the markup for agents that do not run JavaScript', async () => {
+    const { productsForUnits } = require('../lib/recommendations');
+    const { REC_UNITS } = require('../lib/pdp');
+    const product = cat.bySku.get('WKND-JKT-001');
+    const recommendations = await productsForUnits(cat, store, REC_UNITS, { currentSku: product.sku });
+    const html = renderPdp(cat, product, { recommendations });
+    expect(html).toContain('<p><a href="/shop/">Shop</a> › <a href="/shop/apparel">Apparel</a> › Jackets</p>');
+    expect(html).toMatch(/<strong>A\$[\d.]+<\/strong>[^<]* Includes GST · Free standard shipping in Australia over \$150<\/p>/);
+    expect(html).toContain('<p>SKU: WKND-JKT-001 · In stock</p>');
+    ['<h3>Details</h3>', '<h3>Made for</h3>', '<h3>The WKND promise</h3>', 'Free standard shipping'].forEach((t) => expect(html).toContain(t));
+    expect(html).toContain('<h2>Complete your kit</h2>');
+    expect(html).toContain('<h2>More like this</h2>');
+    const recLinks = html.match(/<li><a href="\/shop\/products\/[a-z0-9-]+">/g) || [];
+    expect(recLinks.length).toBeGreaterThan(2);
+    expect(html).not.toContain('href="/shop/products/alpine-shell-jacket"');
+    // block parsing contract (product-details readServerContent): h1 → price → summary; specs are the only h2 + ul
+    expect(html).toMatch(/<h1>[^<]+<\/h1>\n<p><strong>/);
+    const pdpBlock = html.slice(html.indexOf('<div class="product-details">'), html.indexOf('<div class="metadata">'));
+    expect(pdpBlock.match(/<h2>/g)).toHaveLength(1);
+  });
+
   test('path parsing only accepts product URL keys', () => {
     expect(urlKeyFromPath('/shop/products/alpine-shell-jacket.plain.html')).toBe('alpine-shell-jacket');
     expect(urlKeyFromPath('/shop/products/../../etc')).toBeNull();

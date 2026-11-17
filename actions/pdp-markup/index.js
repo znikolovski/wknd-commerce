@@ -6,7 +6,8 @@
 const logging = require('@adobe/aio-lib-core-logging');
 const { getStore } = require('../../lib/store');
 const { loadCatalog } = require('../../lib/catalog');
-const { renderPdp, urlKeyFromPath } = require('../../lib/pdp');
+const { renderPdp, urlKeyFromPath, REC_UNITS } = require('../../lib/pdp');
+const { productsForUnits } = require('../../lib/recommendations');
 
 async function main(params) {
   const logger = logging('pdp-markup', { level: params.LOG_LEVEL || 'info' });
@@ -19,10 +20,12 @@ async function main(params) {
     const cat = await loadCatalog(store, { placeholderImage: params.PLACEHOLDER_IMAGE, siteOrigin: params.SITE_ORIGIN });
     const product = cat.byUrlKey.get(urlKey);
     if (!product) return { statusCode: 404, body: '' };
+    const recommendations = await productsForUnits(cat, store, REC_UNITS, { currentSku: product.sku })
+      .catch((e) => { logger.warn(`recommendations: ${e.message}`); return []; });
     return {
       statusCode: 200,
       headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store', 'Last-Modified': new Date(product.updatedAt || Date.now()).toUTCString() },
-      body: renderPdp(cat, product, { siteOrigin: params.SITE_ORIGIN }),
+      body: renderPdp(cat, product, { siteOrigin: params.SITE_ORIGIN, recommendations }),
     };
   } catch (e) {
     logger.error(e);

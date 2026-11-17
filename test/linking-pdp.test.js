@@ -119,3 +119,29 @@ describe('PDP markup', () => {
     expect(urlKeyFromPath('/blog/post')).toBeNull();
   });
 });
+
+describe('reconcile', () => {
+  const aem = require('../lib/aem');
+  const a1 = asset('71', { 'commerce:isCommerce': 'yes', 'commerce:skus': ['WKND-JKT-001'], 'commerce:positions': ['1'] }, `${ROOT}/apparel/r1.jpg`);
+  const a2 = asset('72', { 'commerce:isCommerce': 'yes', 'commerce:skus': ['WKND-JKT-001'], 'commerce:positions': ['2'] }, `${ROOT}/apparel/r2.jpg`);
+  afterEach(() => jest.restoreAllMocks());
+
+  test('links new assets, skips unchanged ones and removes orphans', async () => {
+    jest.spyOn(aem, 'queryProductAssets').mockResolvedValue([a1, a2]);
+    const first = await linking.reconcile(store, params);
+    expect(first.changedAssets).toBe(2);
+    expect(first.affected).toContain('WKND-JKT-001');
+
+    const replace = jest.spyOn(store.collection('asset_links').constructor.prototype, 'replaceOne');
+    const again = await linking.reconcile(store, params);
+    expect(again).toMatchObject({ changedAssets: 0, linked: 0, orphansRemoved: 0, affected: [] });
+    expect(replace).not.toHaveBeenCalled();
+
+    aem.queryProductAssets.mockResolvedValue([a1]);
+    const pruned = await linking.reconcile(store, params);
+    expect(pruned.orphansRemoved).toBe(1);
+    const links = await store.collection('asset_links').find({ sku: 'WKND-JKT-001' });
+    expect(links.map((l) => l.assetId)).toContain(a1.assetId);
+    expect(links.map((l) => l.assetId)).not.toContain(a2.assetId);
+  });
+});

@@ -102,8 +102,12 @@ application:
             web: 'no'
             annotations:
               include-ims-credentials: true
+            # Bulk uploads fire hundreds of events at once; each activation loads the catalog,
+            # so cap per-container concurrency (Runtime scales out) to avoid OOM-killed containers.
             limits:
               timeout: 60000
+              memorySize: 512
+              concurrency: 10
           reconcile:
             function: actions/reconcile/index.js
             runtime: nodejs:22

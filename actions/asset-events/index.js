@@ -38,9 +38,8 @@ async function main(params) {
   try {
     store = await getStore(params);
     const eventId = event.id || params.id;
-    if (eventId) {
-      if (await store.collection('events').findOne({ id: eventId })) return { statusCode: 200, body: { duplicate: true } };
-      await store.collection('events').insertOne({ id: eventId, type, assetId, receivedAt: new Date().toISOString() });
+    if (eventId && await store.collection('events').findOne({ id: eventId })) {
+      return { statusCode: 200, body: { duplicate: true } };
     }
     let result;
     if (REMOVE_EVENTS.has(type)) {
@@ -52,8 +51,10 @@ async function main(params) {
         return { statusCode: 200, body: { ignored: true, reason: 'outside products root' } };
       }
       const match = linking.matchAssetToProducts(cat, asset, { root });
-      result = { rule: match.rule, ...(await linking.applyAssetMatches(store, params, asset, match, 'event')) };
+      result = { rule: match.rule, ...(await linking.applyAssetMatches(store, params, asset, match, 'event', { catalog: cat })) };
     }
+    // Record only after success so I/O Events retries of failed deliveries are reprocessed.
+    if (eventId) await store.collection('events').insertOne({ id: eventId, type, assetId, receivedAt: new Date().toISOString() });
     if (result.affected?.length) await triggerPrerender(params, result.affected).catch((e) => logger.warn(e.message));
     logger.info(`${type} ${assetId}: ${JSON.stringify(result)}`);
     return { statusCode: 200, body: result };

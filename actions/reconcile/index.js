@@ -11,7 +11,7 @@ async function main(params) {
   let store;
   try {
     store = await getStore(params);
-    const result = await reconcile(store, params);
+    const result = await reconcile(store, params, { log: (m) => logger.info(m) });
     if (result.affected.length) await triggerPrerender(params, result.affected).catch((e) => logger.warn(e.message));
     logger.info(JSON.stringify({ ...result, affected: result.affected.length }));
     return result;

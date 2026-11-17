@@ -49,8 +49,12 @@ async function main(params) {
   try {
     store = await getStore(params);
     const result = await handler(store, body, params);
-    if (result?.affected?.length) {
-      await triggerPrerender(params, result.affected).catch((e) => logger.warn(`prerender trigger failed: ${e.message}`));
+    // deleted products are taken down; a catalog import re-renders every PDP
+    const removed = result?.removed?.urlKey ? { urlKey: result.removed.urlKey } : undefined;
+    const all = op === 'catalog.import';
+    if (result?.affected?.length || removed || all) {
+      await triggerPrerender(params, result?.affected, { removed, all })
+        .catch((e) => logger.warn(`prerender trigger failed: ${e.message}`));
     }
     return { statusCode: 200, body: result };
   } catch (e) {

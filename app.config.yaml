@@ -119,15 +119,32 @@ application:
               include-ims-credentials: true
             limits:
               timeout: 300000
+          pdp-scheduler:
+            function: actions/pdp-scheduler/index.js
+            runtime: nodejs:22
+            web: 'no'
+            inputs:
+              PDP_PUBLISH: $WKND_PDP_PUBLISH
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 60000
         triggers:
           nightly-reconcile:
             feed: /whisk.system/alarms/alarm
             inputs:
               cron: '30 15 * * *'
+          pdp-scheduler-tick:
+            feed: /whisk.system/alarms/alarm
+            inputs:
+              cron: '*/15 * * * *'
         rules:
           nightly-reconcile-rule:
             trigger: nightly-reconcile
             action: reconcile
+          pdp-scheduler-rule:
+            trigger: pdp-scheduler-tick
+            action: pdp-scheduler
 extensions:
   dx/excshell/1:
     $include: src/dx-excshell-1/ext.config.yaml

@@ -1,0 +1,14 @@
+{
+  "name": "WKND AEM Assets product image linking",
+  "description": "AEM Assets (p115476-e1135027) asset events -> commerce/asset-events (Commerce custom asset matcher)",
+  "delivery_type": "webhook",
+  "runtime_action": "commerce/asset-events",
+  "events_of_interest": [
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.metadata_updated" },
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.processing_completed" },
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.ready_for_delivery" },
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.published" },
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.deleted" },
+    { "provider_id": "1c042f61-4995-4007-9390-35cfefda2b0f", "event_code": "aem.assets.asset.removed_from_delivery" }
+  ]
+}

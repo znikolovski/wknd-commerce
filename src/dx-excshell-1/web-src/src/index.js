@@ -27,7 +27,8 @@ try {
 function bootstrapRaw () {
   /* **here you can mock the exc runtime and ims objects** */
   const mockRuntime = { on: () => {} }
-  const mockIms = {}
+  // Standalone (outside the shell) the IMS context can be injected for local testing only.
+  const mockIms = window.__WKND_IMS__ || {}
 
   // render the actual react application and pass along the runtime object to make it available to the App
   ReactDOM.render(
@@ -50,7 +51,6 @@ function bootstrapInExcShell () {
   runtime.on('ready', ({ imsOrg, imsToken, imsProfile, locale }) => {
     // tell the exc-runtime object we are done
     runtime.done()
-    console.log('Ready! received imsProfile:', imsProfile)
     const ims = {
       profile: imsProfile,
       org: imsOrg,
@@ -66,8 +66,8 @@ function bootstrapInExcShell () {
   // set solution info, shortTitle is used when window is too small to display full title
   runtime.solution = {
     icon: 'AdobeExperienceCloud',
-    title: 'wknd-commerce',
-    shortTitle: 'JGR'
+    title: 'WKND Commerce',
+    shortTitle: 'WKND'
   }
-  runtime.title = 'wknd-commerce'
+  runtime.title = 'WKND Commerce admin'
 }

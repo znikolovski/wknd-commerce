@@ -1,43 +1,31 @@
-/* 
-* <license header>
-*/
-
 import React from 'react'
 import { NavLink } from 'react-router-dom'
+import { Flex, Heading, Text, View } from '@adobe/react-spectrum'
+
+const LINKS = [
+  ['/', 'Dashboard'],
+  ['/products', 'Products'],
+  ['/inventory', 'Inventory'],
+  ['/pricing', 'Pricing'],
+  ['/orders', 'Orders']
+]
 
 function SideBar () {
-    return (
-        <ul className="SideNav">
-            <li className="SideNav-item">
-                <NavLink
-                    className={({ isActive }) => `SideNav-itemLink ${isActive ? 'is-selected' : ''}`}
-                    aria-current="page"
-                    end
-                    to="/"
-                >
-                    Home
-                </NavLink>
-            </li>
-            <li className="SideNav-item">
-                <NavLink
-                    className={({ isActive }) => `SideNav-itemLink ${isActive ? 'is-selected' : ''}`}
-                    aria-current="page"
-                    to="/actions"
-                >
-                    Your App Actions
-                </NavLink>
-            </li>
-            <li className="SideNav-item">
-                <NavLink
-                    className={({ isActive }) => `SideNav-itemLink ${isActive ? 'is-selected' : ''}`}
-                    aria-current="page"
-                    to="/about"
-                >
-                    About App Builder
-                </NavLink>
-            </li>
-        </ul>
-    )
+  return (
+    <nav aria-label='WKND Commerce'>
+      <View marginBottom='size-300'>
+        <Heading level={2} margin={0}>WKND Commerce</Heading>
+        <Text>Demo store admin</Text>
+      </View>
+      <Flex direction='column' gap='size-50'>
+        {LINKS.map(([to, label]) => (
+          <NavLink key={to} to={to} end={to === '/'} className={({ isActive }) => `SideNav-itemLink${isActive ? ' is-selected' : ''}`}>
+            {label}
+          </NavLink>
+        ))}
+      </Flex>
+    </nav>
+  )
 }
 
 export default SideBar

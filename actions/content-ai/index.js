@@ -2,32 +2,14 @@
  * content-ai — public proxy for AEM Content AI search (Frescopa-style site search).
  *   POST …/content-ai/search     → POST {CONTENT_AI_URL}/content-sources/search
  *   POST …/content-ai/gensearch  → POST {CONTENT_AI_URL}/content-sources/gensearch
- * The IMS token never reaches the browser; the content source is pinned server-side.
+ * Content AI has no CORS, the IMS token never reaches the browser and the content source is
+ * pinned server-side. Hits are reduced to the fields the search modal renders (raw hits carry
+ * ~5 KB of crawl metadata each).
  */
 const logging = require('@adobe/aio-lib-core-logging');
 const { aemHeaders } = require('../../lib/aem');
 const { decodeBody, corsHeaders } = require('../../lib/http');
-
-const MAX_QUERY = 300;
-const MAX_LIMIT = 20;
-
-function searchBody(input, source) {
-  const text = String(input.query?.text ?? input.query ?? '').slice(0, MAX_QUERY).trim();
-  if (!text) return null;
-  const type = ['vector', 'fulltext', 'hybrid'].includes(input.query?.type) ? input.query.type : 'vector';
-  const limit = Math.min(Number(input.queryOptions?.pagination?.limit) || 8, MAX_LIMIT);
-  const cursor = input.queryOptions?.pagination?.cursor;
-  return {
-    contentSource: { name: source },
-    query: { type, text, ...(input.query?.options ? { options: input.query.options } : {}) },
-    queryOptions: { pagination: { limit, ...(cursor ? { cursor: String(cursor).slice(0, 500) } : {}) } },
-  };
-}
-
-function genBody(input, source) {
-  const query = String(input.query ?? '').slice(0, MAX_QUERY * 4).trim();
-  return query ? { query, contentSource: { name: source } } : null;
-}
+const { searchBody, genBody, toSearchResponse, toGenResponse } = require('../../lib/content-ai');
 
 async function main(params) {
   const logger = logging('content-ai', { level: params.LOG_LEVEL || 'info' });
@@ -40,8 +22,9 @@ async function main(params) {
   const route = String(params.__ow_path || '').replace(/^\/+/, '');
   const input = decodeBody(params);
   const source = params.CONTENT_AI_SOURCE;
-  const body = route === 'gensearch' ? genBody(input, source) : route === 'search' ? searchBody(input, source) : undefined;
-  if (body === undefined) return { statusCode: 404, headers: cors, body: { error: 'Unknown route' } };
+  const builders = { search: searchBody, gensearch: genBody };
+  if (!builders[route]) return { statusCode: 404, headers: cors, body: { error: 'Unknown route' } };
+  const body = builders[route](input, source);
   if (!body) return { statusCode: 400, headers: cors, body: { error: 'query is required' } };
 
   try {
@@ -56,10 +39,15 @@ async function main(params) {
       logger.warn(`${route} ${res.status}: ${text.slice(0, 300)}`);
       return { statusCode: res.status === 429 ? 429 : 502, headers: cors, body: { error: 'Search is temporarily unavailable.' } };
     }
+    const json = JSON.parse(text);
     return {
       statusCode: 200,
-      headers: { ...cors, 'Content-Type': 'application/json', 'Cache-Control': route === 'search' ? 'public, max-age=120' : 'no-store' },
-      body: JSON.parse(text),
+      headers: {
+        ...cors,
+        'Content-Type': 'application/json',
+        'Cache-Control': route === 'search' ? 'public, max-age=120' : 'no-store',
+      },
+      body: route === 'search' ? toSearchResponse(json, params.SITE_ORIGIN) : toGenResponse(json, params.SITE_ORIGIN),
     };
   } catch (e) {
     logger.error(e);

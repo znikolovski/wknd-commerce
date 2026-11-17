@@ -16,7 +16,6 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const env = Object.fromEntries(fs.readFileSync(path.join(root, '.env'), 'utf8').split('\n')
   .filter((l) => /^[A-Za-z_]+=/.test(l)).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 const namespace = env.AIO_runtime_namespace || env.AIO_RUNTIME_NAMESPACE;
-const origins = (env.WKND_ALLOWED_ORIGINS || '').split(',').map((s) => s.trim()).filter(Boolean);
 
 const forwarded = ['authorization', 'store', 'magento-store-code', 'magento-store-view-code', 'magento-website-code', 'magento-environment-id', 'magento-customer-group', 'x-api-key'];
 
@@ -40,7 +39,9 @@ const mesh = {
     ],
     responseConfig: {
       CORS: {
-        origin: origins,
+        // Public catalog + bearer-token customer calls (no cookies) — safe for any storefront
+        // origin, incl. EDS branch previews and local `aem up`.
+        origin: '*',
         methods: ['GET', 'POST', 'OPTIONS'],
         allowedHeaders: ['Content-Type', ...forwarded.map((h) => h.replace(/(^|-)([a-z])/g, (m) => m.toUpperCase()))],
         credentials: false,

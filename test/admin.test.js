@@ -71,3 +71,16 @@ test('disable and delete', async () => {
   expect(res.removed.urlKey).toBeTruthy();
   await expect(admin.getProduct(store, 'WKND-PCK-001')).rejects.toThrow(/not found/);
 });
+
+test('recommendations accept currentProduct and dated view history', async () => {
+  const { loadCatalog } = require('../lib/catalog');
+  const recs = require('../lib/recommendations');
+  const cat = await loadCatalog(store);
+  const res = await recs.recommendationsByUnitIds(cat, store, {
+    unitIds: ['wknd-pdp-more-like-this', 'wknd-recently-viewed'],
+    currentProduct: { sku: 'WKND-JKT-001' },
+    userViewHistory: [{ sku: 'WKND-PCK-001', date: '2026-11-01T00:00:00Z' }, { sku: 'WKND-HYD-001', date: '2026-11-02T00:00:00Z' }],
+  });
+  expect(res.results[0].productsView.length).toBeGreaterThan(0);
+  expect(res.results[1].productsView.map((p) => p.sku)).toEqual(['WKND-HYD-001', 'WKND-PCK-001']);
+});

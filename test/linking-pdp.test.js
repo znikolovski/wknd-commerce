@@ -105,6 +105,8 @@ describe('PDP markup', () => {
   });
   test('renders crawlable content, metadata and JSON-LD', () => {
     const html = renderPdp(cat, cat.bySku.get('WKND-JKT-001'), { siteOrigin: 'https://wknd-adventures.run.place' });
+    expect(html).not.toMatch(/<title>/);
+    expect(html.match(/class="metadata"/g)).toHaveLength(1);
     expect(html).toContain('<div class="product-details">');
     expect(html).toContain('<h1>Alpine Shell Jacket</h1>');
     expect(html).toContain('<div>sku</div><div>WKND-JKT-001</div>');

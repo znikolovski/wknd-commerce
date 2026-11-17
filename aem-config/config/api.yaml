@@ -1,0 +1,13 @@
+# Allowlists the WKND Commerce App Builder OAuth server-to-server credentials for AEM
+# OpenAPI-based APIs on author (Assets Author API, Content AI) — program 115476.
+# Deploy by copying this file into the AEM program repository's /config folder and running
+# the Cloud Manager **config pipeline** for the target environment (p115476-e1135027).
+kind: "API"
+version: "1.0"
+metadata:
+  envTypes: ["dev", "stage", "prod"]
+data:
+  allowedClientIDs:
+    author:
+      - "b7b48bc712df4425bf404fa8b163f634" # wkndcommerce / Stage
+      - "12406119f839404ba98c06e9edde2485" # wkndcommerce / Production

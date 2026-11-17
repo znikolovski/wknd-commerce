@@ -1,0 +1,126 @@
+# WKND Commerce — mock Adobe Commerce backend (API Mesh source), AEM image linking,
+# PDP prerendering, Content AI search proxy and the admin UI (dx/excshell/1).
+# Values come from .env (see .env.example) and are injected as default action inputs.
+application:
+  runtimeManifest:
+    database:
+      auto-provision: true
+      region: amer
+    packages:
+      commerce:
+        license: Apache-2.0
+        inputs:
+          LOG_LEVEL: info
+          AEM_AUTHOR_URL: $WKND_AEM_AUTHOR_URL
+          AEM_PRODUCTS_ROOT: $WKND_AEM_PRODUCTS_ROOT
+          SITE_ORIGIN: $WKND_SITE_ORIGIN
+          PLACEHOLDER_IMAGE: $WKND_PLACEHOLDER_IMAGE
+          HLX_ORG: $WKND_HLX_ORG
+          HLX_SITE: $WKND_HLX_SITE
+          HLX_ADMIN_API_KEY: $WKND_HLX_ADMIN_API_KEY
+        actions:
+          storefront-graphql:
+            function: actions/storefront-graphql/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              AUTH0_ISSUER: $WKND_AUTH0_ISSUER
+              AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
+              ALLOWED_ORIGINS: $WKND_ALLOWED_ORIGINS
+              # API Mesh introspects this source when the mesh is created/updated.
+              ALLOW_INTROSPECTION: 'true'
+              CATALOG_MAX_AGE: 60
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              web-custom-options: true
+              final: true
+            limits:
+              timeout: 30000
+              memorySize: 512
+          auth-config:
+            function: actions/auth-config/index.js
+            runtime: nodejs:22
+            web: 'yes'
+            inputs:
+              AUTH0_ISSUER: $WKND_AUTH0_ISSUER
+              AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
+              AUTH0_CLIENT_ID: $WKND_AUTH0_CLIENT_ID
+            annotations:
+              require-adobe-auth: false
+              final: true
+          pdp-markup:
+            function: actions/pdp-markup/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              final: true
+          prerender:
+            function: actions/prerender/index.js
+            runtime: nodejs:22
+            web: 'no'
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 120000
+          content-ai:
+            function: actions/content-ai/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              CONTENT_AI_URL: $WKND_CONTENT_AI_URL
+              CONTENT_AI_SOURCE: $WKND_CONTENT_AI_SOURCE
+              ALLOWED_ORIGINS: $WKND_ALLOWED_ORIGINS
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              web-custom-options: true
+              final: true
+            limits:
+              timeout: 30000
+          asset-to-product:
+            function: actions/asset-to-product/index.js
+            runtime: nodejs:22
+            web: 'yes'
+            annotations:
+              require-adobe-auth: true
+              include-ims-credentials: true
+              final: true
+          product-to-asset:
+            function: actions/product-to-asset/index.js
+            runtime: nodejs:22
+            web: 'yes'
+            annotations:
+              require-adobe-auth: true
+              include-ims-credentials: true
+              final: true
+          asset-events:
+            function: actions/asset-events/index.js
+            runtime: nodejs:22
+            web: 'no'
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 60000
+          reconcile:
+            function: actions/reconcile/index.js
+            runtime: nodejs:22
+            web: 'no'
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 300000
+        triggers:
+          nightly-reconcile:
+            feed: /whisk.system/alarms/alarm
+            inputs:
+              cron: '30 15 * * *'
+        rules:
+          nightly-reconcile-rule:
+            trigger: nightly-reconcile
+            action: reconcile
+extensions:
+  dx/excshell/1:
+    $include: src/dx-excshell-1/ext.config.yaml

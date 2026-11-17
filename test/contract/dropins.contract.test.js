@@ -243,7 +243,7 @@ describe('signed-in customer journey (Auth0)', () => {
     const res = await run('storefront-account/GET_CUSTOMER');
     expect(res.errors[0].extensions.category).toBe('graphql-authorization');
     const stale = await runGraphQL({ query: OPS['storefront-auth/VALIDATE_TOKEN'], headers: { authorization: 'Bearer expired' } }, { store, params: {}, verify });
-    expect(stale.body.errors[0]).toMatchObject({ path: ['customer'], extensions: { category: 'graphql-authorization' } });
+    expect(stale.body.errors[0]).toMatchObject({ path: ['customer'], extensions: { category: 'graphql-authentication' } });
     const catalogWithStaleToken = await runGraphQL({ query: OPS['storefront-cart/STORE_CONFIG_QUERY'], headers: { authorization: 'Bearer expired' } }, { store, params: {}, verify });
     expect(catalogWithStaleToken.body.errors).toBeUndefined();
     const customerCart = await ok('storefront-checkout/getCustomerCart', {}, { auth: true });

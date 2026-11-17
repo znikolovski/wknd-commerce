@@ -1,80 +1,63 @@
 # wknd-commerce
 
-Welcome to my Adobe I/O Application!
+This is a mock **Adobe Commerce** backend for the WKND Adventures shop, built on Adobe App Builder.
+It provides:
+- GraphQL for the Commerce drop-ins, fronted by **API Mesh**;
+- an **ExC Shell admin UI** for products, inventory, pricing and orders;
+- **AEM Assets → product image linking** (Commerce custom asset matcher);
+- a **Content AI** search proxy;
+- **BYOM PDP markup** for Edge Delivery Services.
+
+The storefront lives in the sibling repo `../masterclass-demo`. See its `docs/SHOP.md` for the end-to-end
+architecture and `docs/SHOP-ANALYTICS-PLAN.md` for analytics.
+
+## Layout
+
+| Path | Purpose |
+|------|---------|
+| `actions/storefront-graphql` | Mesh source: merged Core + Catalog Service schema (`lib/schema-sdl.js`), resolvers in `lib/` |
+| `actions/pdp-markup`, `actions/prerender` | EDS content overlay for `/shop/products/*`; preview/publish of changed PDPs |
+| `actions/content-ai` | CORS proxy to AEM Content AI (`/adobe/contentAI`); compact hits + `grounded` flag (`lib/content-ai.js`) |
+| `actions/asset-events`, `asset-to-product`, `product-to-asset`, `reconcile` | AEM image linking (I/O Events + nightly alarm) |
+| `actions/auth-config` | Public Auth0 SPA settings (shared with WKND Aero) |
+| `src/dx-excshell-1` | Admin SPA (React Spectrum) and the IMS-protected `commerce-admin/admin` RPC |
+| `events/aem-assets-registration.json` | I/O Events registration (AEM Assets provider → `commerce/asset-events`) |
+| `aem-config/config/api.yaml` | AEM author API client allowlist (deploy via the Cloud Manager config pipeline) |
+| `data/` | Catalog source and generated catalog (99 products / 584 sellable SKUs) |
+| `test/` | Drop-in GraphQL contract, linking, PDP, admin and Content AI tests |
+
+Data lives in App Builder Database Storage (`aio-lib-db`). Prices are AUD and GST-inclusive.
+Payment is **WKND Demo Pay**, which takes no real payment.
 
 ## Setup
 
-- Populate the `.env` file in the project root and fill it as shown [below](#env)
+1. `aio app use` (Console project `wkndcommerce`, Stage workspace). Then copy `.env.example` to `.env`
+   and fill in the `WKND_*` values. Secrets stay in `.env` only.
+2. `npm install`
+3. `aio app deploy`
+4. `npm run catalog:seed` to load the catalog (`npm run catalog:generate` regenerates it from `data/catalog-source.mjs`).
+5. `npm run mesh:build && aio api-mesh update mesh.json`. The Mesh uses a static SDL source because the
+   schema is too large for introspection through Runtime.
+6. `aio event registration create events/aem-assets-registration.json` (once per workspace).
 
-## Local Dev
+**Admin UI (Stage):**
+`https://experience.adobe.com/?devMode=true#/custom-apps/?localDevUrl=https://28538-wkndcommerce-stage.adobeio-static.net/index.html`
 
-- `aio app run` to start your local Dev server
-- App will run on `localhost:9080` by default
+## Commands
 
-By default the UI will be served locally but actions will be deployed and served from Adobe I/O Runtime. To run your actions locally use the `aio app dev` option.
+| Command | Purpose |
+|---------|---------|
+| `npm test` | All Jest tests (incl. the drop-in operation contract) |
+| `npm run lint` | ESLint for actions, lib, scripts and tests |
+| `npm run schema:refresh` | Re-introspect reference Commerce schemas and rebuild `lib/schema-sdl.js` |
+| `npm run dropins:extract` | Re-extract GraphQL operations from the storefront's pinned drop-ins |
+| `node scripts/smoke-live.mjs` | Live smoke test through the Mesh (catalog → cart → order) |
 
-For more information on the difference between `aio app run` and `aio app dev`, see [here](https://developer.adobe.com/app-builder/docs/guides/development/#aio-app-dev-vs-aio-app-run)
+## Notes
 
-## Test & Coverage
-
-- Run `aio app test` to run unit tests for ui and actions
-- Run `aio app test --e2e` to run e2e tests
-
-## Deploy & Cleanup
-
-- `aio app deploy` to build and deploy all actions on Runtime and static files to CDN
-- `aio app undeploy` to undeploy the app
-
-## Config
-
-### `.env`
-
-You can generate this file using the command `aio app use`. 
-
-```bash
-# This file must **not** be committed to source control
-
-## please provide your Adobe I/O Runtime credentials
-# AIO_RUNTIME_AUTH=
-# AIO_RUNTIME_NAMESPACE=
-```
-
-### `app.config.yaml`
-
-- Main configuration file that defines an application's implementation. 
-- More information on this file, application configuration, and extension configuration 
-  can be found [here](https://developer.adobe.com/app-builder/docs/guides/configuration/#appconfigyaml)
-
-#### Action Dependencies
-
-- You have two options to resolve your actions' dependencies:
-
-  1. **Packaged action file**: Add your action's dependencies to the root
-   `package.json` and install them using `npm install`. Then set the `function`
-   field in `app.config.yaml` to point to the **entry file** of your action
-   folder. We will use `webpack` to package your code and dependencies into a
-   single minified js file. The action will then be deployed as a single file.
-   Use this method if you want to reduce the size of your actions.
-
-  2. **Zipped action folder**: In the folder containing the action code add a
-     `package.json` with the action's dependencies. Then set the `function`
-     field in `app.config.yaml` to point to the **folder** of that action. We will
-     install the required dependencies within that directory and zip the folder
-     before deploying it as a zipped action. Use this method if you want to keep
-     your action's dependencies separated.
-
-## Debugging in VS Code
-
-While running your local server (`aio app dev`), both UI and actions can be debugged. To do so follow the instructions [here](https://developer.adobe.com/app-builder/docs/guides/development/#debugging)
-
-## Typescript support for UI
-
-To use typescript use `.tsx` extension for react components and add a `tsconfig.json` 
-and make sure you have the below config added
-```
- {
-  "compilerOptions": {
-      "jsx": "react"
-    }
-  } 
-```
+- **CORS.** `ALLOWED_ORIGINS` accepts one wildcard host label, e.g.
+  `https://*--masterclass-demo--znikolovski.aem.page` for branch previews.
+- **Content AI.** The experimental `/adobe/experimental/aemcontentai-*` path rejects S2S tokens, so the
+  stable `/adobe/contentAI` API is used instead. `gensearch` answers are shown only when `grounded`.
+- **PDP prerendering.** This needs `WKND_HLX_ADMIN_API_KEY`. Without it, PDPs are still served through the
+  overlay once previewed.

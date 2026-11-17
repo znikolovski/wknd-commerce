@@ -61,10 +61,13 @@ application:
             function: actions/prerender/index.js
             runtime: nodejs:22
             web: 'no'
+            inputs:
+              PDP_PUBLISH: $WKND_PDP_PUBLISH
+              PDP_MARKUP_URL: $WKND_PDP_MARKUP_URL
             annotations:
               include-ims-credentials: true
             limits:
-              timeout: 120000
+              timeout: 300000
           content-ai:
             function: actions/content-ai/index.js
             runtime: nodejs:22

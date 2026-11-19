@@ -61,3 +61,22 @@ test('persistent short reads keep serving the last complete snapshot', async () 
 test('without a previous snapshot an incomplete read fails loudly', async () => {
   await expect(loadCatalog(flakyPrices(store, 10))).rejects.toBeInstanceOf(IncompleteReadError);
 });
+
+test('snapshot reads ask for large cursor batches (each batch is a DB round trip)', async () => {
+  const options = [];
+  const spy = {
+    ...store,
+    collection(name) {
+      const coll = store.collection(name);
+      return {
+        ...coll,
+        find: (filter, opts) => { options.push(opts); return coll.find(filter, opts); },
+        countDocuments: (...args) => coll.countDocuments(...args),
+        findOne: (...args) => coll.findOne(...args),
+      };
+    },
+  };
+  await loadCatalog(spy);
+  expect(options).toHaveLength(5);
+  options.forEach((o) => expect(o.batchSize).toBeGreaterThanOrEqual(1000));
+});

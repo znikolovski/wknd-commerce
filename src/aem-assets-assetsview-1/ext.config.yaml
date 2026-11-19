@@ -1,0 +1,8 @@
+operations:
+  view:
+    - type: web
+      impl: assets.html
+actions: actions
+web: ../dx-excshell-1/web-src
+runtimeManifest:
+  $include: ../commerce-runtime.yaml

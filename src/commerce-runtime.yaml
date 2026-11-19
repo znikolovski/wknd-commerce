@@ -1,0 +1,43 @@
+packages:
+  commerce-admin:
+    license: Apache-2.0
+    inputs:
+      LOG_LEVEL: info
+      ADMIN_IMS_ORG: $WKND_ADMIN_IMS_ORG
+      AEM_AUTHOR_URL: $WKND_AEM_AUTHOR_URL
+      AEM_PRODUCTS_ROOT: $WKND_AEM_PRODUCTS_ROOT
+      CONTENT_AI_URL: $WKND_CONTENT_AI_URL
+      CONTENT_AI_SOURCE: $WKND_CONTENT_AI_SOURCE
+      PRERENDER_ACTION: commerce/prerender
+    actions:
+      admin:
+        function: ../actions/admin/index.js
+        web: 'yes'
+        runtime: nodejs:22
+        annotations:
+          require-adobe-auth: true
+          include-ims-credentials: true
+          final: true
+        limits:
+          timeout: 120000
+          memorySize: 512
+  commerce-assets:
+    license: Apache-2.0
+    inputs:
+      LOG_LEVEL: info
+      ADMIN_IMS_ORG: $WKND_ADMIN_IMS_ORG
+      AEM_AUTHOR_URL: $WKND_AEM_AUTHOR_URL
+      AEM_PRODUCTS_ROOT: $WKND_AEM_PRODUCTS_ROOT
+      PRERENDER_ACTION: commerce/prerender
+    actions:
+      manage:
+        function: ../actions/assets-panel/index.js
+        web: 'yes'
+        runtime: nodejs:22
+        annotations:
+          require-adobe-auth: true
+          include-ims-credentials: true
+          final: true
+        limits:
+          timeout: 60000
+          memorySize: 512

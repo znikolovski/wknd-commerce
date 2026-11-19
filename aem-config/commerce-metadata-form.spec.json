@@ -1,0 +1,61 @@
+{
+  "description": "Manual Assets View metadata-form blueprint, not an Adobe import/export payload. Copy existing editorial tabs before assigning this form. Commerce arrays must stay multi-valued.",
+  "name": "WKND Commerce Product Assets",
+  "type": "File",
+  "folderAssignments": ["/content/dam/wknd-adventures/products"],
+  "tabs": [
+    {
+      "name": "Commerce",
+      "fields": [
+        {
+          "label": "Use in commerce",
+          "component": "Drop-down",
+          "property": "commerce:isCommerce",
+          "readOnly": true,
+          "choices": [{"label": "Yes", "value": "yes"}, {"label": "No", "value": "no"}],
+          "description": "Managed by the WKND Commerce extension; No permanently excludes the asset from matching."
+        },
+        {
+          "label": "Product SKUs",
+          "component": "Multi value text",
+          "property": "commerce:skus",
+          "readOnly": true,
+          "description": "Parent and/or variant SKUs, validated against the custom commerce catalog."
+        },
+        {
+          "label": "Image roles",
+          "component": "Multi value text",
+          "property": "commerce:roles",
+          "readOnly": true,
+          "description": "image, small_image, thumbnail, swatch_image, hero or an existing custom_* role. Empty means matcher defaults."
+        },
+        {
+          "label": "Gallery positions",
+          "component": "Multi value text",
+          "property": "commerce:positions",
+          "readOnly": true,
+          "description": "Whole-number strings, aligned by index with Product SKUs. The extension supports positions 1 through 9999."
+        },
+        {
+          "label": "Commerce approval status",
+          "component": "Single-line text",
+          "property": "dam:status",
+          "readOnly": true,
+          "description": "Existing approval metadata read by the matcher; the extension never approves assets."
+        },
+        {
+          "label": "Title",
+          "component": "Single-line text",
+          "property": "dc:title",
+          "readOnly": false
+        },
+        {
+          "label": "Description / image alt text",
+          "component": "Multi-line text",
+          "property": "dc:description",
+          "readOnly": false
+        }
+      ]
+    }
+  ]
+}

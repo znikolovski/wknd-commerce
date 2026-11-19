@@ -27,6 +27,9 @@ application:
               AUTH0_ISSUER: $WKND_AUTH0_ISSUER
               AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
               ALLOWED_ORIGINS: $WKND_ALLOWED_ORIGINS
+              # Delegated shopper assertions from the WKND LLM app (ChatGPT); both must be set
+              MCP_DELEGATION_ISSUER: $WKND_MCP_DELEGATION_ISSUER
+              MCP_DELEGATION_SECRET: $WKND_MCP_DELEGATION_SECRET
               # API Mesh introspects this source when the mesh is created/updated.
               ALLOW_INTROSPECTION: 'true'
               CATALOG_MAX_AGE: 60
@@ -146,5 +149,7 @@ application:
             trigger: pdp-scheduler-tick
             action: pdp-scheduler
 extensions:
+  aem/assets/assetsview/1:
+    $include: src/aem-assets-assetsview-1/ext.config.yaml
   dx/excshell/1:
     $include: src/dx-excshell-1/ext.config.yaml

@@ -81,7 +81,7 @@ csDoc.definitions.forEach((cs) => {
 });
 
 // Project-owned storefront extensions (e.g. promotions/recovery offers).
-const EXTENSIONS = ['schema/promotions.graphql'];
+const EXTENSIONS = ['schema/promotions.graphql', 'schema/of1.graphql'];
 const merged = {
   kind: Kind.DOCUMENT,
   definitions: [...defs.values(), ...EXTENSIONS.flatMap((p) => parse(read(p)).definitions)],

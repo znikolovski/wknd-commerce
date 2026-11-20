@@ -139,6 +139,46 @@ promotion definitions and their durable reconciliation state remain intact. Disa
 active promotions with revision-aware `disable_promotion` before withdrawing management access
 if their pricing effects must stop. Do not delete receipts, policies or worker recovery state.
 
+## OF1 product-first discovery
+
+`of1Discovery(query: String!, history: [String!])` is a read-only storefront query for
+the WKND OF1 gateway. It returns `experience` (`product`, `adventure`, `clarification`),
+at most three `ProductView` records, catalog-backed comparison context, concrete
+adventure slugs, optional inclusive AUD `maxPrice`, and complete-query suggestions.
+
+The service lives in `lib/of1-discovery.js`. Explicit shopping/category requests lead
+with products; trip preparation remains adventure-first. Budgets use real priced,
+available variants. Exact named sold-out products may still be compared, with purchase
+disabled. Missing facts/prices are not invented. Unsupported/ambiguous inputs get a
+clarification; a genuine empty shortlist remains a product no-match, not an adventure.
+
+Inputs are bounded to 500 characters and five recent queries. The SDK includes the
+current query in history; it is removed before resolving refinements. History has query
+strings, not prior results, so ordinal references require a product name.
+No customer identity, cart mutation or model call is involved. Discovery responses are
+not HTTP-cacheable and do not change the existing `productSearch` semantics.
+
+Project-owned SDL is in `schema/of1.graphql`; `scripts/build-schema.mjs` incorporates it
+without changing the reference Commerce schemas. Regenerate both schema outputs and
+the Mesh source when deploying:
+
+```sh
+npm run schema:build
+./node_modules/.bin/jest test/of1-discovery.test.js test/contract/dropins.contract.test.js --runInBand
+npm run mesh:build
+```
+
+The storefront/gateway currently use the **Production** Mesh. This checkout may be
+configured for **Stage**. Verify `aio console where`, the Runtime namespace and generated
+Mesh endpoint before any deployment; do not enable product-first routing against a Mesh
+that has not received the query. Use targeted `commerce/storefront-graphql` deployment
+and the intended workspace's Mesh update, not a broad app deployment.
+
+After Commerce and storefront code are ready, enable the existing gateway's
+`OF1_PRODUCT_FIRST_ENABLED` input. Its manifest defaults to false for safe rollout.
+The storefront's `tools/scripts/test-of1-products.mjs` exercises the real SDK/gateway/
+drop-ins against an isolated in-memory backend without touching live carts.
+
 ## Delegated shoppers (WKND LLM app / ChatGPT)
 
 The WKND LLM app (`../masterclass-demo-llmapp`) lets signed-in shoppers use their cart and check out

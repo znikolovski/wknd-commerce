@@ -546,6 +546,7 @@ type Query {
   operational cohort (inactive 24h to 7 days, no purchase since); read-only.
   """
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+  of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
 }
 
 """"""
@@ -22872,4 +22873,20 @@ type WkndRecoveryOffer {
   percent_off: Float
   max_discount: Money
   expires_at: String
+}
+
+type Of1Discovery {
+  experience: String!
+  heading: String!
+  explanation: String!
+  maxPrice: Float
+  subject: String!
+  products: [ProductView!]!
+  adventureSlugs: [String!]!
+  suggestions: [Of1Suggestion!]!
+}
+
+type Of1Suggestion {
+  label: String!
+  query: String!
 }

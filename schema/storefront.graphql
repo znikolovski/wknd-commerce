@@ -540,6 +540,7 @@ type Query {
     """Attributes and direction to sort on"""
     sort: [ProductSearchSortInput!]
   ): ProductSearchResponse!
+  of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
 }
 
 """"""
@@ -22834,4 +22835,20 @@ input ViewHistory {
 input ViewHistoryInput {
   dateTime: DateTime
   sku: String!
+}
+
+type Of1Discovery {
+  experience: String!
+  heading: String!
+  explanation: String!
+  maxPrice: Float
+  subject: String!
+  products: [ProductView!]!
+  adventureSlugs: [String!]!
+  suggestions: [Of1Suggestion!]!
+}
+
+type Of1Suggestion {
+  label: String!
+  query: String!
 }

@@ -80,7 +80,10 @@ csDoc.definitions.forEach((cs) => {
   }
 });
 
-const merged = { kind: Kind.DOCUMENT, definitions: [...defs.values()] };
+const merged = {
+  kind: Kind.DOCUMENT,
+  definitions: [...defs.values(), ...parse(read('schema/of1.graphql')).definitions],
+};
 const schema = buildSchema(print(merged));
 const sdl = printSchema(schema);
 

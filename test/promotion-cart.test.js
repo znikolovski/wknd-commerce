@@ -206,6 +206,37 @@ describe('protected cart recovery', () => {
     expect(r.errors[0].message).toBe('Coupon is not available for this shopper.');
   });
 
+  test('offer reports engine-computed saving vs the current promotion (display only)', async () => {
+    const COMPARE = 'query Offer($id: String!) { wkndRecoveryOffer(cart_id: $id) { status saving { value } current_saving { value } } }';
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 3 });
+    await age(id, 30);
+    const fresh = (await gql(COMPARE, { id })).data.wkndRecoveryOffer;
+    const subtotalMinor = Math.round(priceOf(pricey.sku).regular * 100) * 3;
+    expect(fresh).toEqual({
+      status: 'ELIGIBLE', saving: { value: Math.min(Math.round(subtotalMinor * 0.1), 2500) / 100 }, current_saving: { value: 0 },
+    });
+
+    const withCode = (await gql(APPLY, { id, code: 'WKND10' })).data.applyCouponToCart.cart;
+    await age(id, 30);
+    const compared = (await gql(COMPARE, { id })).data.wkndRecoveryOffer;
+    expect(compared.current_saving.value).toBe(withCode.prices.discounts[0].amount.value);
+    expect(compared.saving.value).toBe(fresh.saving.value);
+    expect(compared.current_saving.value).toBeGreaterThan(compared.saving.value);
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    const claimed = (await gql(COMPARE, { id })).data.wkndRecoveryOffer;
+    expect(claimed).toMatchObject({ status: 'CLAIMED', saving: fresh.saving, current_saving: compared.current_saving });
+    // Estimating never applies the offer.
+    expect((await gql(`query($id: String!) { cart(cart_id: $id) { ${CART_FIELDS} } }`, { id })).data.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+  });
+
+  test('unavailable offers carry no saving figures', async () => {
+    const COMPARE = 'query Offer($id: String!) { wkndRecoveryOffer(cart_id: $id) { status saving { value } current_saving { value } } }';
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    expect((await gql(COMPARE, { id })).data.wkndRecoveryOffer).toEqual({ status: 'INELIGIBLE', saving: null, current_saving: null });
+  });
+
   test('claim → apply → order; then the campaign is redeemed for that shopper', async () => {
     const id = await customerCartId();
     await gql(ADD, { id, sku: pricey.sku, qty: 2 });

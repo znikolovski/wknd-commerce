@@ -107,6 +107,8 @@ describe('operator workflow', () => {
     await expect(svc.approveRun(operator('m'), { runId, templateId: '12', maxRecipients: 5 })).rejects.toMatchObject({ code: 'SELF_APPROVAL' });
     await expect(svc.approveRun(operator('a'), { runId, templateId: '12', maxRecipients: 50 })).rejects.toMatchObject({ code: 'APPROVAL_MISMATCH' });
     await expect(svc.executeRun({ runId })).rejects.toMatchObject({ code: 'NOT_APPROVED' });
+    const integration = { actor: { kind: 'integration', subject: 'coworker-mcp', orgId: 'ORG@AdobeOrg' }, correlationId: crypto.randomUUID() };
+    await expect(svc.approveRun(integration, { runId, templateId: '12', maxRecipients: 5 })).rejects.toMatchObject({ code: 'HUMAN_APPROVAL_REQUIRED' });
     expect(await svc.approveRun(operator('a'), { runId, templateId: '12', maxRecipients: 5 })).toEqual({ runId, state: 'approved' });
   });
 });

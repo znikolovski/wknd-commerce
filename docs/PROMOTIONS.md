@@ -25,8 +25,11 @@ const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store
 await svc.createPromotion(ctx, { idempotencyKey, promotion });
 ```
 
-`ctx = { actor: { kind: 'ims-operator', subject, orgId }, correlationId }` must be built by the
-verified IMS boundary only. Results are transport-independent envelopes; adapters map `ok:false`
+`ctx = { actor: { kind, subject, orgId }, correlationId }` must be built by the verified boundary
+only. `kind` is `ims-operator` (individually verified IMS user/org) or `integration` (shared
+server-configured credential such as the MCP shared-secret header; `subject`/`orgId` are
+server-owned constants, never taken from the request). Integration actors can manage promotions
+and request email runs, but cannot approve email runs (`HUMAN_APPROVAL_REQUIRED`). Results are transport-independent envelopes; adapters map `ok:false`
 to tool errors without changing fields. Golden contract: `test/contract/promotions.contract.test.js`.
 
 Storage has no multi-document transactions. Receipts, code reservations and recovery redemptions

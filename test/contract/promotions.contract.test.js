@@ -88,6 +88,17 @@ describe('envelopes and validation', () => {
     expect(r.committed).toBe(false);
   });
 
+  test('shared integration actors are accepted with server-owned identity', async () => {
+    const integration = { actor: { kind: 'integration', subject: 'coworker-mcp', orgId: ORG }, correlationId: uuid() };
+    const key = uuid();
+    const r = await svc.createPromotion(integration, { idempotencyKey: key, promotion: definition() });
+    expect(r.ok).toBe(true);
+    const receipt = await store.collection('promotion_requests').findOne({ idempotencyKey: key });
+    expect(receipt.actor).toEqual({ kind: 'integration', subject: 'coworker-mcp' });
+    expect(JSON.stringify(r)).not.toMatch(/coworker-mcp|integration/);
+    expect((await svc.listPromotions({ ...integration, actor: { ...integration.actor, kind: 'browser' } }, {})).error.code).toBe('PROMOTION_CONFIGURATION_ERROR');
+  });
+
   test('unverified context is rejected, never defaulted', async () => {
     const r = await svc.listPromotions({ actor: { subject: 'x', orgId: ORG }, correlationId: uuid() }, {});
     expect(r.error.code).toBe('PROMOTION_CONFIGURATION_ERROR');

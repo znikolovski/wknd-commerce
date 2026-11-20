@@ -30,6 +30,8 @@ const sku = CATALOG.products.find((p) => p.type === 'simple').sku;
 let store;
 let sent;
 let brevo;
+let blocked;
+const withBlocked = (client) => ({ listBlockedContacts: async () => ({ contacts: blocked, count: blocked.length }), ...client });
 const clock = () => NOW;
 const operator = (subject) => ({ actor: { kind: 'ims-operator', subject, orgId: 'ORG@AdobeOrg' }, correlationId: crypto.randomUUID() });
 
@@ -69,7 +71,8 @@ beforeEach(async () => {
   await migrateLegacyPromotions(store);
   await bootstrapRecoveryPromotion(store);
   sent = [];
-  brevo = { sendTemplate: async (msg) => { sent.push(msg); return { messageId: `<m${sent.length}@brevo>` }; } };
+  blocked = [];
+  brevo = withBlocked({ sendTemplate: async (msg) => { sent.push(msg); return { messageId: `<m${sent.length}@brevo>` }; } });
 });
 
 describe('preference', () => {
@@ -158,13 +161,13 @@ describe('execution', () => {
 
   test('ambiguous provider outcomes are never resent; rate limits defer', async () => {
     await enableOffer();
-    brevo = { sendTemplate: async () => { throw new BrevoError('timeout', { ambiguous: true }); } };
+    brevo = withBlocked({ sendTemplate: async () => { throw new BrevoError('timeout', { ambiguous: true }); } });
     let svc = createRecoveryEmail({
       store, params: PARAMS, clock, brevo,
     });
     await svc.resume();
     expect(await svc.executeRun({ runId: await approvedRun(svc) })).toMatchObject({ unknown: 2, sent: 0 });
-    brevo = { sendTemplate: async (m) => { sent.push(m); return { messageId: 'x' }; } };
+    brevo = withBlocked({ sendTemplate: async (m) => { sent.push(m); return { messageId: 'x' }; } });
     svc = createRecoveryEmail({
       store, params: PARAMS, clock, brevo,
     });
@@ -175,20 +178,49 @@ describe('execution', () => {
   test('429 releases the claim so a later run can retry', async () => {
     await enableOffer();
     let calls = 0;
-    brevo = {
+    brevo = withBlocked({
       sendTemplate: async (m) => {
         calls += 1;
         if (calls === 1) throw new BrevoError('rate limited', { status: 429, ambiguous: false });
         sent.push(m);
         return { messageId: 'x' };
       },
-    };
+    });
     const svc = createRecoveryEmail({
       store, params: PARAMS, clock, brevo,
     });
     await svc.resume();
     expect(await svc.executeRun({ runId: await approvedRun(svc) })).toMatchObject({ deferred: 1, sent: 0 });
     expect(await svc.executeRun({ runId: await approvedRun(svc) })).toMatchObject({ sent: 2 });
+  });
+
+  test('Brevo unsubscribes/bounces are synced before sending (no webhook needed)', async () => {
+    await enableOffer();
+    blocked = [
+      { email: 'Ava@example.com', reason: { code: 'unsubscribedViaEmail' } },
+      { email: 'nobody@example.com', reason: { code: 'hardBounce' } },
+    ];
+    const svc = createRecoveryEmail({
+      store, params: PARAMS, clock, brevo,
+    });
+    await svc.resume();
+    await svc.executeRun({ runId: await approvedRun(svc) });
+    expect(sent.map((m) => m.to.email)).toEqual(['ben@example.com']);
+    expect((await store.collection('customers').findOne({ sub: 'auth0|ava' })).marketing.recoveryEmail.optIn).toBe(false);
+    expect(await store.collection('email_suppressions').countDocuments({})).toBe(2);
+  });
+
+  test('fails closed when Brevo suppression state cannot be read', async () => {
+    await enableOffer();
+    brevo = { ...brevo, listBlockedContacts: async () => { throw new BrevoError('down', { ambiguous: false }); } };
+    const svc = createRecoveryEmail({
+      store, params: PARAMS, clock, brevo,
+    });
+    await svc.resume();
+    const runId = await approvedRun(svc);
+    await expect(svc.executeRun({ runId })).rejects.toMatchObject({ code: 'SUPPRESSION_SYNC_FAILED' });
+    expect(sent).toHaveLength(0);
+    expect((await store.collection('recovery_email_runs').findOne({ runId })).state).toBe('approved');
   });
 
   test('purchase since the cart activity suppresses the email', async () => {

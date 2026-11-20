@@ -94,7 +94,12 @@ Actions (manifest entries to add):
 | Action | Type | Params |
 | --- | --- | --- |
 | `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED` |
-| `brevo-webhook` | raw web action, no IMS | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
+| `brevo-webhook` | raw web action, no IMS (optional) | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
+
+Suppression does not depend on the webhook: before every run `executeRun` pulls Brevo's
+transactional blocked/unsubscribed contacts (`GET /v3/smtp/blockedContacts`) into
+`email_suppressions` and turns off the opt-in for unsubscribes. If that call fails the run sends
+nothing (`SUPPRESSION_SYNC_FAILED`) and stays approved. The webhook only shortens the delay.
 
 Operator tools (CX Coworker via the Commerce MCP) call `createRecoveryEmail({ store, params, brevo })`
 with `brevo = createBrevoClient({ apiKey: params.BREVO_API_KEY })`: status, pause, resume,

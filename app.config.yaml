@@ -33,6 +33,7 @@ application:
               # API Mesh introspects this source when the mesh is created/updated.
               ALLOW_INTROSPECTION: 'true'
               CATALOG_MAX_AGE: 60
+              RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
             annotations:
               require-adobe-auth: false
               include-ims-credentials: true
@@ -52,6 +53,49 @@ application:
             annotations:
               require-adobe-auth: false
               final: true
+          mcp:
+            function: actions/commerce-mcp/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              MCP_SHARED_SECRET: $WKND_COMMERCE_MCP_SECRET
+              MCP_ORG_ID: $WKND_COMMERCE_MCP_ORG
+              MCP_ALLOWED_ORIGINS: $WKND_COMMERCE_MCP_ALLOWED_ORIGINS
+              MCP_PROMOTION_WRITES_ENABLED: $WKND_MCP_PROMOTION_WRITES_ENABLED
+              PROMOTION_CURSOR_KEY: $WKND_PROMOTION_CURSOR_KEY
+              RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              web-custom-options: true
+              final: true
+            limits:
+              timeout: 120000
+              memorySize: 512
+          promotions-worker:
+            function: actions/promotions-worker/index.js
+            runtime: nodejs:22
+            web: 'no'
+            inputs:
+              RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 120000
+              memorySize: 512
+          brevo-webhook:
+            function: actions/brevo-webhook/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              BREVO_WEBHOOK_TOKEN: $WKND_BREVO_WEBHOOK_TOKEN
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              final: true
+            limits:
+              timeout: 30000
+              memorySize: 512
           pdp-markup:
             function: actions/pdp-markup/index.js
             runtime: nodejs:22
@@ -141,6 +185,10 @@ application:
             feed: /whisk.system/alarms/alarm
             inputs:
               cron: '*/15 * * * *'
+          promotions-worker-tick:
+            feed: /whisk.system/alarms/alarm
+            inputs:
+              cron: '*/5 * * * *'
         rules:
           nightly-reconcile-rule:
             trigger: nightly-reconcile
@@ -148,6 +196,9 @@ application:
           pdp-scheduler-rule:
             trigger: pdp-scheduler-tick
             action: pdp-scheduler
+          promotions-worker-rule:
+            trigger: promotions-worker-tick
+            action: promotions-worker
 extensions:
   aem/assets/assetsview/1:
     $include: src/aem-assets-assetsview-1/ext.config.yaml

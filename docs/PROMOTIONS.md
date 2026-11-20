@@ -66,3 +66,34 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 
 AAM segment `27504716` (Cart Abandoners) is a content-targeting reference only. It is never
 discount authorization.
+
+## Recovery email pilot (Brevo)
+
+`lib/recovery-email.js` sends **one** cart-reminder email per inactivity episode to signed-in
+customers who explicitly opted in (`setWkndRecoveryEmailOptIn`, `Customer.wknd_recovery_email_opt_in`;
+default off, never inferred from sign-in or checkout). Safety defaults:
+
+- **Paused** until `resume()`; **test-recipient allowlist** on (`RECOVERY_EMAIL_ALLOWLIST`) until
+  `RECOVERY_EMAIL_ALLOWLIST_DISABLED=true`.
+- Runs: `requestRun(ctx, { maxRecipients ≤ 50 })` → `approveRun` by a **different** IMS subject,
+  bound to the same template id and size, valid 24h → `executeRun({ runId })`.
+- Every recipient is rechecked (consent, suppression, allowlist, 24h–7d window, no purchase since,
+  offer enabled/verified, daily budget `RECOVERY_EMAIL_DAILY_BUDGET`, default 50).
+- Ledger `recovery_email_ledger` is unique per campaign/customer/episode. Ambiguous provider
+  outcomes become `unknown` and are never resent; HTTP 429 releases the claim for a later run.
+- `status()` returns aggregate counts only — no emails or customer ids leave the service.
+- Email params: `FIRSTNAME`, `CART_URL` (campaign UTM only, shopper signs in), `PERCENT_OFF`,
+  `MAX_DISCOUNT`. The Brevo template must state that the store and payment are a demo and include
+  Brevo's unsubscribe link.
+
+Actions (manifest entries to add):
+
+| Action | Type | Params |
+| --- | --- | --- |
+| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED` |
+| `brevo-webhook` | raw web action, no IMS | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
+
+Operator tools (CX Coworker via the Commerce MCP) call `createRecoveryEmail({ store, params, brevo })`
+with `brevo = createBrevoClient({ apiKey: params.BREVO_API_KEY })`: status, pause, resume,
+requestRun, approveRun, executeRun. Brevo's own MCP in CX Coworker is for template/campaign drafts
+and reporting; recovery sends go only through `executeRun`.

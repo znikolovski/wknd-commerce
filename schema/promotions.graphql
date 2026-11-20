@@ -31,3 +31,13 @@ type WkndRecoveryOffer {
   max_discount: Money
   expires_at: String
 }
+
+extend type Customer {
+  "Explicit opt-in to one cart-reminder email per inactive cart (never inferred from sign-in or checkout)."
+  wknd_recovery_email_opt_in: Boolean!
+}
+
+extend type Mutation {
+  "Signed-in customer sets the cart-reminder email preference."
+  setWkndRecoveryEmailOptIn(opt_in: Boolean!): Boolean!
+}

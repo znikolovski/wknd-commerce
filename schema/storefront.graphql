@@ -1827,6 +1827,9 @@ type Mutation {
   discount is applied only when the shopper applies the returned coupon code to that cart.
   """
   claimWkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+
+  """Signed-in customer sets the cart-reminder email preference."""
+  setWkndRecoveryEmailOptIn(opt_in: Boolean!): Boolean!
 }
 
 """Defines the comparison operators that can be used in a filter."""
@@ -8561,6 +8564,11 @@ type Customer {
     """Specifies which page of results to return. The default value is 1."""
     currentPage: Int = 1
   ): [Wishlist]!
+
+  """
+  Explicit opt-in to one cart-reminder email per inactive cart (never inferred from sign-in or checkout).
+  """
+  wknd_recovery_email_opt_in: Boolean!
 }
 
 """"""

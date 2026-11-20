@@ -1,0 +1,33 @@
+extend type Query {
+  """
+  Signed-in shopper's cart-recovery offer status for one of their carts. Server-evaluated
+  operational cohort (inactive 24h to 7 days, no purchase since); read-only.
+  """
+  wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+}
+
+extend type Mutation {
+  """
+  Issues the signed-in shopper's cart-recovery entitlement when eligible (idempotent). The
+  discount is applied only when the shopper applies the returned coupon code to that cart.
+  """
+  claimWkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+}
+
+enum WkndRecoveryOfferStatus {
+  SIGN_IN_REQUIRED
+  UNAVAILABLE
+  INELIGIBLE
+  ELIGIBLE
+  CLAIMED
+  REDEEMED
+}
+
+type WkndRecoveryOffer {
+  status: WkndRecoveryOfferStatus!
+  reason: String
+  coupon_code: String
+  percent_off: Float
+  max_discount: Money
+  expires_at: String
+}

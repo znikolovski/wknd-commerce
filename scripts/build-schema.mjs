@@ -80,7 +80,12 @@ csDoc.definitions.forEach((cs) => {
   }
 });
 
-const merged = { kind: Kind.DOCUMENT, definitions: [...defs.values()] };
+// Project-owned storefront extensions (e.g. promotions/recovery offers).
+const EXTENSIONS = ['schema/promotions.graphql'];
+const merged = {
+  kind: Kind.DOCUMENT,
+  definitions: [...defs.values(), ...EXTENSIONS.flatMap((p) => parse(read(p)).definitions)],
+};
 const schema = buildSchema(print(merged));
 const sdl = printSchema(schema);
 

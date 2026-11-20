@@ -10,7 +10,7 @@ const { createMemoryStore } = require('../../lib/store');
 const { importCatalog } = require('../../lib/importer');
 const { loadCatalog, resetCatalogCache } = require('../../lib/catalog');
 const {
-  createPromotionService, migrateLegacyPromotions, LEGACY_SEEDS, decodeCursor,
+  createPromotionService, migrateLegacyPromotions, LEGACY_SEEDS, decodeCursor, loadPromotionRuntime,
 } = require('../../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../../lib/recovery-policy');
 
@@ -559,5 +559,71 @@ describe('legacy migration', () => {
     await fresh.collection('promotion_codes').insertOne({ _id: 'WKND10', code: 'WKND10', promotionId: 'prm_ffffffffffffffffffffffffffffffff' });
     await expect(migrateLegacyPromotions(fresh)).rejects.toMatchObject({ code: 'MIGRATION_CONFLICT' });
     expect(await fresh.collection('promotion_meta').countDocuments({})).toBe(0);
+  });
+});
+
+describe('code reservation and runtime regressions (review findings)', () => {
+  test('a losing concurrent update never releases the code the winner committed', async () => {
+    const created = await create({ code: 'AAA1' });
+    const update = () => svc.updatePromotion(ctx(), {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: uuid(), promotion: definition({ code: 'BBB2' }),
+    });
+    const results = await Promise.all([update(), update()]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok).error.code).toBe('REVISION_CONFLICT');
+    expect(await store.collection('promotion_codes').findOne({ code: 'BBB2' })).toMatchObject({ promotionId: created.promotion.id });
+    expect((await create({ code: 'BBB2', name: 'Second' })).error.code).toBe('COUPON_CODE_CONFLICT');
+    expect(await store.collection('promotion_codes').findOne({ code: 'AAA1' })).toBeNull();
+  });
+
+  test('a retryable create releases or re-adopts its reservation', async () => {
+    const requests = store.collection('promotion_requests');
+    const original = requests.updateOne.bind(requests);
+    let failed = false;
+    requests.updateOne = async (filter, update, opts) => {
+      if (!failed && update.$set?.state === 'writing') {
+        failed = true;
+        throw new Error('transient');
+      }
+      return original(filter, update, opts);
+    };
+    const key = uuid();
+    const first = await create({ code: 'LEAK1' }, key);
+    requests.updateOne = original;
+    expect(first.error).toMatchObject({ code: 'PROMOTION_SERVICE_UNAVAILABLE', retryable: true });
+    expect(await store.collection('promotion_codes').findOne({ code: 'LEAK1' })).toBeNull();
+    now += 5000;
+    const retried = await create({ code: 'LEAK1' }, key);
+    expect(retried).toMatchObject({ ok: true, promotion: { code: 'LEAK1' } });
+    expect((await create({ code: 'LEAK1', name: 'Other' })).error.code).toBe('COUPON_CODE_CONFLICT');
+  });
+
+  test('a stale claimed create abandoned by the worker frees its code', async () => {
+    const markWritingFails = store.collection('promotion_requests');
+    const original = markWritingFails.updateOne.bind(markWritingFails);
+    markWritingFails.updateOne = async (filter, update, opts) => {
+      if (update.$set?.state === 'writing') return { matchedCount: 0 };
+      if (update.$set?.state === 'failed' || update.$set?.state === 'retryable') return { matchedCount: 0 };
+      return original(filter, update, opts);
+    };
+    const key = uuid();
+    await create({ code: 'STALE1' }, key);
+    markWritingFails.updateOne = original;
+    now += 61000;
+    await svc.recoverRequests();
+    expect(await store.collection('promotion_codes').findOne({ code: 'STALE1' })).toBeNull();
+    expect((await create({ code: 'STALE1' })).ok).toBe(true);
+  });
+
+  test('disabled promotions never exhaust the evaluation candidate limit', async () => {
+    const docs = Array.from({ length: 1001 }, (_, i) => {
+      const id = `prm_f${i.toString(16).padStart(31, '0')}`;
+      return {
+        _id: id, id, slot: 1, revision: 1, managementClass: 'standard', name: 'x', enabled: false, mode: 'automatic', code: null, discount: { kind: 'fixed', amountMinor: 100, currency: 'AUD' }, maxDiscountMinor: null, minimumMerchandiseMinor: null, target: { kind: 'all' }, startsAt: null, endsAt: null, audienceRestriction: null, recentSlots: [],
+      };
+    });
+    await store.collection('promotions').insertMany(docs);
+    const runtime = await loadPromotionRuntime(store, { cart: { coupons: ['wknd10'] } });
+    expect(runtime.definitions.map((d) => d.code)).toEqual(['WKND10']);
   });
 });

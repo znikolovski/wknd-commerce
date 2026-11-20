@@ -9,9 +9,10 @@
  *   node scripts/migrate-promotions.mjs --verify-storage      # prove unique _id + conditional
  *                                                             # update on a scratch collection
  *
- * Database credentials come from .env (OAuth server-to-server credential of the App Builder
- * workspace): PROMOTIONS_DB_CLIENT_ID, PROMOTIONS_DB_CLIENT_SECRET, PROMOTIONS_DB_ORG_ID,
- * optional PROMOTIONS_DB_SCOPES (comma separated) and DB_REGION.
+ * Uses the same App Builder Database Storage as the deployed actions, authenticated with the
+ * workspace's OAuth server-to-server credential from .env (IMS_OAUTH_S2S_CLIENT_ID/_SECRET/
+ * _ORG_ID/_SCOPES, written by `aio app use`; PROMOTIONS_DB_* override them) and DB_REGION
+ * (default amer). `--env=<path>` reads another checkout's .env (e.g. a worktree without one).
  * Migration never overwrites operator edits or re-enables promotions; a foreign record using a
  * legacy code fails with MIGRATION_CONFLICT and storage stays uninitialized.
  */
@@ -27,27 +28,39 @@ const { getStore, createMemoryStore, isDuplicateKeyError } = require(path.join(r
 const { migrateLegacyPromotions } = require(path.join(root, 'lib/promotions.js'));
 const { bootstrapRecoveryPromotion } = require(path.join(root, 'lib/recovery-policy.js'));
 
-const args = new Set(process.argv.slice(2));
+const args = new Set(process.argv.slice(2).filter((a) => !a.startsWith('--env=')));
+
+const envArg = process.argv.slice(2).find((a) => a.startsWith('--env='));
 
 function readEnv() {
-  const file = path.join(root, '.env');
+  const file = envArg ? path.resolve(envArg.slice(6)) : path.join(root, '.env');
   if (!fs.existsSync(file)) return {};
   return Object.fromEntries(fs.readFileSync(file, 'utf8').split('\n')
     .filter((l) => /^[A-Za-z_][A-Za-z0-9_]*=/.test(l))
     .map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
 }
 
+function parseScopes(raw = '') {
+  const text = String(raw).trim();
+  if (text.startsWith('[')) return JSON.parse(text);
+  return text.split(',').map((x) => x.trim()).filter(Boolean);
+}
+
 async function openStore() {
   if (args.has('--memory')) return createMemoryStore();
   const env = { ...readEnv(), ...process.env };
-  const missing = ['PROMOTIONS_DB_CLIENT_ID', 'PROMOTIONS_DB_CLIENT_SECRET', 'PROMOTIONS_DB_ORG_ID'].filter((k) => !env[k]);
-  if (missing.length) throw new Error(`Missing ${missing.join(', ')} (see script header).`);
+  const pick = (name) => env[`PROMOTIONS_DB_${name}`] || env[`IMS_OAUTH_S2S_${name}`];
+  const missing = ['CLIENT_ID', 'CLIENT_SECRET', 'ORG_ID'].filter((k) => !pick(k));
+  if (missing.length) throw new Error(`Missing IMS_OAUTH_S2S_${missing.join(', IMS_OAUTH_S2S_')} in .env (run \`aio app use\`).`);
+  // The database is scoped to the workspace's Runtime namespace (set in actions by I/O Runtime).
+  process.env.__OW_NAMESPACE ||= env.AIO_runtime_namespace || env.AIO_RUNTIME_NAMESPACE;
+  if (!process.env.__OW_NAMESPACE) throw new Error('Missing AIO_runtime_namespace in .env (run `aio app use`).');
   return getStore({
-    clientId: env.PROMOTIONS_DB_CLIENT_ID,
-    clientSecret: env.PROMOTIONS_DB_CLIENT_SECRET,
-    orgId: env.PROMOTIONS_DB_ORG_ID,
-    scopes: (env.PROMOTIONS_DB_SCOPES || '').split(',').map((s) => s.trim()).filter(Boolean),
-    DB_REGION: env.DB_REGION,
+    clientId: pick('CLIENT_ID'),
+    clientSecret: pick('CLIENT_SECRET'),
+    orgId: pick('ORG_ID'),
+    scopes: parseScopes(pick('SCOPES')),
+    DB_REGION: env.DB_REGION || 'amer',
   });
 }
 
@@ -72,8 +85,17 @@ async function verifyStorage(store) {
     casStaleRejected: (stale?.matchedCount ?? 0) === 0,
     finalSlot: final?.slot,
   };
-  result.verified = result.duplicateRejected && result.casFirstMatched && result.casStaleRejected && result.finalSlot === 2;
+  // Concurrency: N racing inserts of one _id and N racing CAS writes from the same slot.
+  const raceId = `race-${crypto.randomUUID()}`;
+  const inserts = await Promise.allSettled(Array.from({ length: 10 }, (_, i) => coll.insertOne({ _id: raceId, key: raceId, slot: 1, writer: i })));
+  result.raceInsertWinners = inserts.filter((r) => r.status === 'fulfilled').length;
+  result.raceInsertDuplicates = inserts.filter((r) => r.status === 'rejected' && isDuplicateKeyError(r.reason)).length;
+  const cas = await Promise.all(Array.from({ length: 10 }, (_, i) => coll.replaceOne({ key: raceId, slot: 1 }, { key: raceId, slot: 2, writer: i })));
+  result.raceCasWinners = cas.filter((r) => (r?.matchedCount ?? 0) === 1).length;
+  result.verified = result.duplicateRejected && result.casFirstMatched && result.casStaleRejected && result.finalSlot === 2
+    && result.raceInsertWinners === 1 && result.raceInsertDuplicates === 9 && result.raceCasWinners === 1;
   await coll.deleteOne({ key: id });
+  await coll.deleteOne({ key: raceId });
   return result;
 }
 

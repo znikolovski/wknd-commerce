@@ -6,6 +6,7 @@ It provides:
 - an **ExC Shell admin UI** for products, inventory, pricing and orders;
 - **AEM Assets → product image linking** (Commerce custom asset matcher);
 - a **Content AI** search proxy;
+- a **CX Coworker operator MCP** with privacy-safe reads and discount-only writes;
 - **BYOM PDP markup** for Edge Delivery Services.
 
 The storefront lives in the sibling repo `../masterclass-demo`. See its `docs/SHOP.md` for the end-to-end
@@ -20,6 +21,7 @@ architecture and `docs/SHOP-ANALYTICS-PLAN.md` for analytics.
 | `actions/content-ai` | CORS proxy to AEM Content AI (`/adobe/contentAI`); compact hits + `grounded` flag (`lib/content-ai.js`) |
 | `actions/asset-events`, `asset-to-product`, `product-to-asset`, `reconcile` | AEM image linking (I/O Events + nightly alarm) |
 | `actions/auth-config` | Public Auth0 SPA settings (shared with WKND Aero) |
+| `actions/commerce-mcp` | Shared-key operator MCP (not shopper delegation or IMS passthrough) |
 | `src/dx-excshell-1` | Admin SPA (React Spectrum) and the IMS-protected `commerce-admin/admin` RPC |
 | `src/aem-assets-assetsview-1` | Assets View **WKND Commerce** product-linking panel and IMS-protected `commerce-assets/manage` RPC |
 | `aem-config/commerce-metadata-form.spec.json` | Native Assets View Commerce metadata field mappings (manual form blueprint) |
@@ -54,6 +56,88 @@ Payment is **WKND Demo Pay**, which takes no real payment.
 | `npm run schema:refresh` | Re-introspect reference Commerce schemas and rebuild `lib/schema-sdl.js` |
 | `npm run dropins:extract` | Re-extract GraphQL operations from the storefront's pinned drop-ins |
 | `node scripts/smoke-live.mjs` | Live smoke test through the Mesh (catalog → cart → order) |
+| `node scripts/smoke-mcp.mjs` | Official MCP SDK smoke over local HTTP and in-memory commerce; no deployment |
+
+## CX Coworker commerce MCP
+
+The remote Streamable HTTP endpoint is the `commerce/mcp` raw App Builder action.
+This intentionally uses a **shared integration key**, not IMS passthrough. Every key holder
+has the same permissions and server-owned audit identity `integration:cx-coworker`.
+`WKND_COMMERCE_MCP_ORG` is a stable deployment namespace, **not** verified membership in
+an Adobe organization. Existing IMS admin and shopper Auth0/delegation routes are unchanged.
+
+After an **explicitly approved deployment**, configure Coworker's custom remote MCP with:
+
+- Transport: **Streamable HTTP**; URL: the deployed `commerce/mcp` web action URL.
+- Custom header: **`X-WKND-MCP-Key`**, value matching `WKND_COMMERCE_MCP_SECRET`.
+- Do not put credentials in the URL or chat. No OAuth/IMS header is required for this endpoint.
+
+Configure `.env` using `.env.example`. The shared secret must be a securely generated
+base64url value containing at least 32 random bytes (43–128 characters). Missing/invalid
+key or namespace configuration fails closed. Keep secrets in deployment configuration,
+never Git, logs or MCP arguments. Rotate by replacing the server secret, redeploying with
+approval and updating Coworker's header; the old secret immediately stops working on the
+updated deployment. Use a separate environment/secret for each integration trust boundary.
+An optional exact browser-Origin allowlist is available; leave it empty for server-to-server
+Coworker requests without `Origin`. Wildcards are not supported. Query parameters are rejected.
+
+### Permissions and outcomes
+
+| Tools | Scope |
+| --- | --- |
+| `commerce_stats`, `list_categories`, `list_products`, `get_product`, `list_inventory` | Read-only catalog, AUD prices, inventory and honestly capped recent-order aggregates |
+| `list_orders`, `get_order` | Order numbers, totals and line items; no customer identity, email, address, payment or access tokens; exact-number search only |
+| `set_product_sale`, `clear_product_sale`, `bulk_product_sale`, `bulk_clear_product_sale` | Only special prices/windows; no base-price, inventory, product, order or customer mutations |
+| `list_promotions`, `get_promotion`, `create_promotion`, `update_promotion`, `disable_promotion` | Thin adapters to frozen `wknd.promotions/v1`; no independent engine or caller-supplied actor/org |
+
+Product sales use integer AUD cents or percentages from 1 to below 90, strict millisecond
+UTC windows and explicit SKU/category selections. Parent selection includes variants;
+bulk scope is at most 100 parents/1,000 price records. Category matching is exact or
+slash-descendant, never a raw string prefix. Sales are **not atomic or idempotent**:
+inspect per-SKU partial/unknown results before retrying. Audit/invalidation/prerender warnings
+do not undo a saved price; rendering submission is not proof of completed publication.
+
+Promotion writes require UUIDv4 idempotency keys and update/disable require expected revisions.
+Full updates require every mutable field. Preserve returned envelopes and inspect `committed`,
+not just tool success. For unknown outcomes use
+`get_promotion({request:{operation,idempotencyKey}})` with the **original key**; a missing
+or expired receipt never authorizes reissuing a write. Cursors expire after 15 minutes,
+bind limit/filters and represent live traversal rather than a snapshot.
+Promotion discounts do not change public catalog prices or trigger PDP prerenders.
+Read-only `managementClass` identifies protected recovery, which generic tools cannot
+create or weaken. Audience-restricted writes remain unsupported.
+
+No unrestricted admin RPC, GraphQL, migration, recovery worker, shopper evidence,
+customer lookup or email approval/send tools are exposed. A shared key is not human approval.
+
+### Activation, validation and rollback
+
+`WKND_MCP_PROMOTION_WRITES_ENABLED=false` is the default. Promotion management reads require
+the explicit migration; writes additionally require approved real-database unique-key/CAS
+verification. Follow [the shared promotion runbook](docs/PROMOTIONS.md), then explicitly enable
+the MCP write flag and deploy only with authorization. Never treat passing memory tests as
+production storage proof. Keep `WKND_RECOVERY_REDEMPTION_VERIFIED=false` until protected
+redemption guarantees are verified separately. `WKND_PROMOTION_CURSOR_KEY` is base64 for
+exactly 32 random bytes (rotation invalidates cursors).
+
+Before migration the storefront retains its built-in legacy coupons; migration preserves
+TRAILREADY's below-AUD200 acceptance with zero saving. A retained explicit legacy coupon
+suppresses automatic promotions; exactly AUD200 saves AUD20. New coupons do not inherit
+this exception. The five-minute non-web promotion worker settles durable requests/effects.
+The optional Brevo webhook only records suppression, requires its separate bearer secret,
+and does not send emails. Recovery email sends remain separately approval-gated and are
+not part of this MCP.
+
+Run `node scripts/smoke-mcp.mjs` for a local official-SDK HTTP handshake/list/read check.
+After approved deployment, `node scripts/smoke-mcp.mjs https://YOUR-DEPLOYED-MCP-URL` uses
+`WKND_COMMERCE_MCP_SECRET` from the process environment and performs **reads only**.
+Actual Coworker connectivity still needs verification in the deployed environment.
+
+To revoke MCP access, remove/rotate its secret or remove the action at the next approved
+deployment. To stop only promotion management writes set the write flag false; existing
+promotion definitions and their durable reconciliation state remain intact. Disable individual
+active promotions with revision-aware `disable_promotion` before withdrawing management access
+if their pricing effects must stop. Do not delete receipts, policies or worker recovery state.
 
 ## OF1 product-first discovery
 

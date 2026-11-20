@@ -62,6 +62,17 @@ test('without a previous snapshot an incomplete read fails loudly', async () => 
   await expect(loadCatalog(flakyPrices(store, 10))).rejects.toBeInstanceOf(IncompleteReadError);
 });
 
+test('fresh management reads bypass a warm cache and never fall back to stale data', async () => {
+  const good = await loadCatalog(store);
+  await expect(loadCatalog(flakyPrices(store, 10), { fresh: true })).rejects.toBeInstanceOf(IncompleteReadError);
+  expect(await loadCatalog(store)).toBe(good);
+  expect(good.priceBySku.size).toBe(CATALOG.prices.length);
+  await store.collection('prices').updateOne({ sku: SKU }, { $set: { regular: 123.45 } });
+  const fresh = await loadCatalog(store, { fresh: true });
+  expect(fresh).not.toBe(good);
+  expect(priceFor(fresh, SKU).regular).toBe(123.45);
+});
+
 test('snapshot reads ask for large cursor batches (each batch is a DB round trip)', async () => {
   const options = [];
   const spy = {

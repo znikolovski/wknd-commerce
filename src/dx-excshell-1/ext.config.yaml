@@ -6,3 +6,5 @@ actions: actions
 web: web-src
 runtimeManifest:
   $include: ../commerce-runtime.yaml
+hooks:
+  pre-app-deploy: node scripts/check-deploy-env.mjs

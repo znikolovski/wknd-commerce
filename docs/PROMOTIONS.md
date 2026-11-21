@@ -63,6 +63,20 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 | `AUTH0_ISSUER` | storefront | existing; binds shopper identity for recovery |
 | `PROMOTIONS_DB_CLIENT_ID`, `PROMOTIONS_DB_CLIENT_SECRET`, `PROMOTIONS_DB_ORG_ID`, `DB_REGION` | migration script (local `.env`) | workspace OAuth S2S credential |
 
+## Deploy input check
+
+`aio app deploy` takes `$WKND_*` action inputs from the deploying checkout's `.env`. If a gate is
+missing there, it would silently deploy in its default state. The `pre-app-deploy` hook
+(`npm run deploy:check`, `scripts/check-deploy-env.mjs`) therefore refuses to deploy unless:
+
+- `WKND_RECOVERY_REDEMPTION_VERIFIED` is explicitly set to `true` or `false`;
+- `WKND_PROMOTION_SELECTION` is explicitly set to `best-saving` or `explicit-first`;
+- `WKND_AUTH0_ISSUER` and `WKND_AUTH0_AUDIENCE` are set.
+
+It prints only the namespace, variable names and the allowed gate values, never secrets.
+Variables the manifest references but `.env` doesn't declare are listed as warnings. To deploy a
+gate off, set it to its off value explicitly. Use `--env=<path>` to check another checkout.
+
 ## Delegation secret per environment
 
 Stage and Production must use **different** `WKND_MCP_DELEGATION_SECRET` values. They share the

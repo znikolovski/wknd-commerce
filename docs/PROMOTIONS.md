@@ -59,6 +59,7 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 | --- | --- | --- |
 | `PROMOTION_CURSOR_KEY` | management adapter | base64 of 32 random bytes; rotating invalidates cursors |
 | `RECOVERY_REDEMPTION_VERIFIED` | storefront + management | `true` only after `--verify-storage` passes against the real database |
+| `PROMOTION_SELECTION` | storefront + management | `best-saving` opts into the `wknd.promotions/v2` selection gate (highest actual saving of the eligible coupon and best automatic; ties keep the coupon; a beaten coupon stays stored as `superseded`). Anything else keeps v1 explicit-coupon precedence. Set the same value on every action that prices carts or orders. |
 | `AUTH0_ISSUER` | storefront | existing; binds shopper identity for recovery |
 | `PROMOTIONS_DB_CLIENT_ID`, `PROMOTIONS_DB_CLIENT_SECRET`, `PROMOTIONS_DB_ORG_ID`, `DB_REGION` | migration script (local `.env`) | workspace OAuth S2S credential |
 
@@ -103,6 +104,22 @@ Suppression does not depend on the webhook: before every run `executeRun` pulls 
 transactional blocked/unsubscribed contacts (`GET /v3/smtp/blockedContacts`) into
 `email_suppressions` and turns off the opt-in for unsubscribes. If that call fails the run sends
 nothing (`SUPPRESSION_SYNC_FAILED`) and stays approved. The webhook only shortens the delay.
+
+### Marketing consent purposes
+
+Consent is per purpose and never bundled or inferred (Spam Act 2003 express consent; APP 5/7):
+
+| Purpose | Profile field | GraphQL |
+| --- | --- | --- |
+| `recovery` — cart reminders | `marketing.recoveryEmail` | `wknd_recovery_email_opt_in`, `setWkndRecoveryEmailOptIn` |
+| `audience` — WKND news & offers | `marketing.audienceEmail` | `wknd_marketing_email_opt_in`, `setWkndMarketingEmailOptIn` |
+
+- Mutations take `wording_version` (required to opt into `audience`) and `source` (`WEB`/`IOS`).
+- Every change appends to `marketing_consent_events` (`purpose`, `optIn`, `source`,
+  `wordingVersion`, `at`, hashed `subject` + `subjectKind`) as consent evidence.
+- Delegated agents (the ChatGPT/LLM app) cannot change consent (`DIRECT_SIGN_IN_REQUIRED`).
+- A Brevo unsubscribe (webhook or blocked-contact sync) withdraws **every** purpose; hard bounces,
+  complaints and blocks suppress the address for all sends.
 
 Operator tools (CX Coworker via the Commerce MCP) call `createRecoveryEmail({ store, params, brevo })`
 with `brevo = createBrevoClient({ apiKey: params.BREVO_API_KEY })`: status, pause, resume,

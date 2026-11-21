@@ -168,6 +168,58 @@ describe('generic coupons through the shared engine', () => {
   });
 });
 
+describe('wknd.promotions/v2 best-saving gate through cart and order', () => {
+  const actor = { kind: 'ims-operator', subject: 'op', orgId: 'ORG@AdobeOrg' };
+  async function createAutomatic(basisPoints) {
+    const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store), params });
+    const r = await svc.createPromotion({ actor, correlationId: crypto.randomUUID() }, {
+      idempotencyKey: crypto.randomUUID(),
+      promotion: {
+        name: `Auto ${basisPoints}`,
+        enabled: true,
+        mode: 'automatic',
+        code: null,
+        discount: { kind: 'percentage', basisPoints },
+        maxDiscountMinor: null,
+        minimumMerchandiseMinor: null,
+        target: { kind: 'all' },
+        startsAt: null,
+        endsAt: null,
+        audienceRestriction: null,
+      },
+    });
+    expect(r.ok).toBe(true);
+  }
+
+  beforeEach(async () => {
+    await migrateLegacyPromotions(store);
+    await createAutomatic(1500);
+  });
+
+  test('v1 default: the explicit WKND10 coupon wins even though the automatic saves more', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    const cart = (await gql(APPLY, { id, code: 'WKND10' })).data.applyCouponToCart.cart;
+    expect(cart.prices.discounts[0].coupon).toEqual({ code: 'WKND10' });
+  });
+
+  test('best-saving: the larger automatic applies, the coupon stays stored, and the order uses it', async () => {
+    params = { ...READY, PROMOTION_SELECTION: 'best-saving' };
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    const cart = (await gql(APPLY, { id, code: 'WKND10' })).data.applyCouponToCart.cart;
+    const subtotalMinor = Math.round(cart.prices.subtotal_including_tax.value * 100);
+    expect(cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+    expect(cart.prices.discounts).toHaveLength(1);
+    expect(cart.prices.discounts[0]).toMatchObject({ coupon: null, amount: { value: Math.round(subtotalMinor * 0.15) / 100 } });
+    await readyForCheckout(id);
+    const placed = await gql(PLACE, { id });
+    expect(placed.data.placeOrder.errors).toEqual([]);
+    const order = await store.collection('orders').findOne({ number: placed.data.placeOrder.orderV2.number });
+    expect(order.promotion).toMatchObject({ code: null });
+  });
+});
+
 describe('protected cart recovery', () => {
   beforeEach(async () => {
     await migrateLegacyPromotions(store);

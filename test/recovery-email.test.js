@@ -249,3 +249,52 @@ describe('Brevo webhook', () => {
     expect(status.audience.optedIn).toBe(0);
   });
 });
+
+describe('marketing consent purposes (Spam Act express consent)', () => {
+  const BEARER = ['Bearer', 'shopper-token'].join(' ');
+  const verify = async () => ({ sub: 'auth0|ava', email: 'ava@example.com' });
+  const gql = async (query) => (await runGraphQL({ query, headers: { authorization: BEARER } }, { store, params: PARAMS, verify })).body;
+  const events = () => store.collection('marketing_consent_events').find({});
+
+  test('news & offers consent is separate, explicit and evidenced with its wording version', async () => {
+    await shopper('auth0|ava', 'ava@example.com', { optIn: null });
+    expect((await gql('{ customer { wknd_recovery_email_opt_in wknd_marketing_email_opt_in } }')).data.customer)
+      .toEqual({ wknd_recovery_email_opt_in: false, wknd_marketing_email_opt_in: false });
+    await gql('mutation { setWkndRecoveryEmailOptIn(opt_in: true, wording_version: "recovery-2026-11") }');
+    expect((await gql('{ customer { wknd_marketing_email_opt_in } }')).data.customer.wknd_marketing_email_opt_in).toBe(false);
+
+    const missing = await gql('mutation { setWkndMarketingEmailOptIn(opt_in: true) }');
+    expect(missing.errors[0].message).toBe('Consent wording version is required.');
+    expect((await gql('mutation { setWkndMarketingEmailOptIn(opt_in: true, wording_version: "news-offers-2026-11", source: IOS) }')).data.setWkndMarketingEmailOptIn).toBe(true);
+    const record = (await store.collection('customers').findOne({ sub: 'auth0|ava' })).marketing.audienceEmail;
+    expect(record).toMatchObject({ optIn: true, source: 'ios', wordingVersion: 'news-offers-2026-11' });
+    const log = await events();
+    expect(log.map((e) => [e.purpose, e.optIn, e.source])).toEqual([['recovery', true, 'account-settings'], ['audience', true, 'ios']]);
+    expect(log.every((e) => e.subjectKind === 'customer' && !String(e.subject).includes('auth0'))).toBe(true);
+
+    expect((await gql('mutation { setWkndMarketingEmailOptIn(opt_in: false) }')).data.setWkndMarketingEmailOptIn).toBe(false);
+    expect(await store.collection('marketing_consent_events').countDocuments({})).toBe(3);
+  });
+
+  test('delegated agents (LLM app) cannot give or withdraw consent', async () => {
+    const { setMarketingConsent } = require('../lib/recovery-email');
+    await shopper('auth0|ava', 'ava@example.com', { optIn: null });
+    await expect(setMarketingConsent(store, { sub: 'auth0|ava', delegated: true }, 'audience', true, { wordingVersion: 'v1' }))
+      .rejects.toMatchObject({ code: 'DIRECT_SIGN_IN_REQUIRED' });
+    expect(await store.collection('marketing_consent_events').countDocuments({})).toBe(0);
+  });
+
+  test('a Brevo unsubscribe withdraws every marketing purpose and is evidenced', async () => {
+    await shopper('auth0|ava', 'ava@example.com');
+    await store.collection('customers').updateOne({ sub: 'auth0|ava' }, { $set: { 'marketing.audienceEmail': { optIn: true } } });
+    const headers = { authorization: ['Bearer', PARAMS.BREVO_WEBHOOK_TOKEN].join(' ') };
+    expect(await handleBrevoWebhook(store, { headers, body: [{ event: 'unsubscribed', email: 'Ava@Example.com' }], params: PARAMS }))
+      .toEqual({ status: 200, suppressed: true });
+    const { marketing } = await store.collection('customers').findOne({ sub: 'auth0|ava' });
+    expect([marketing.recoveryEmail.optIn, marketing.audienceEmail.optIn]).toEqual([false, false]);
+    const log = await events();
+    expect(log.map((e) => [e.purpose, e.optIn, e.source, e.subjectKind]).sort()).toEqual([
+      ['audience', false, 'brevo-unsubscribe', 'email'], ['recovery', false, 'brevo-unsubscribe', 'email'],
+    ]);
+  });
+});

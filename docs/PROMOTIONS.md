@@ -14,7 +14,7 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 | `lib/promotion-evaluation.js` | Pure cart evaluation: sale prices first, eligible explicit coupon wins, otherwise best automatic; largest-remainder allocation; GST |
 | `lib/promotion-effects.js` | Durable effect intent + global promotion invalidation (never product sale prices or PDP prerenders) |
 | `lib/recovery-policy.js` | Protected recovery policy (10%, AUD 25 cap), 24h–7d cohort, entitlements, single-redemption reservation |
-| `lib/shopper-audiences.js` | Fail-closed audience evidence resolver (no verified AAM provider) |
+| `lib/shopper-audiences.js` | Audience evidence resolver, inert until a verified provider exists. Returns `qualified` / `notQualified` / `unavailable`. The binding is derived server-side from the verified Auth0 identity. Any incomplete, stale or mismatched evidence returns `unavailable` |
 | `scripts/migrate-promotions.mjs` | Explicit idempotent migration, recovery bootstrap, storage capability check |
 
 ## Management service

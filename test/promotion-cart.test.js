@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { SignJWT } = require('jose');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const { runGraphQL } = require('../lib/graphql-server');
@@ -455,5 +456,167 @@ describe('coupon writes are revision-guarded (protected-offer removal / no-downg
     expect(await store.collection('recovery_entitlements').find({})).toEqual(before);
     expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
     expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
+});
+
+describe('reviewed-version recovery offer apply/remove (no-downgrade, changed-cart guard)', () => {
+  const MCP_ISSUER = 'https://example.adobeio-static.net/api/v1/web/llm-apps/mcp';
+  const SECRET = 'test-only-mcp-delegation-secret-of-32-bytes+';
+  const VERSION = 'query($id: String!) { cart(cart_id: $id) { wknd_cart_version applied_coupons { code } } }';
+  const APPLY_OFFER = 'mutation($id: String!, $v: String!) { applyWkndRecoveryOffer(cart_id: $id, expected_cart_version: $v) { outcome cart { wknd_cart_version applied_coupons { code } prices { discounts { amount { value } } } } } }';
+  const REMOVE_OFFER = 'mutation($id: String!, $v: String!) { removeWkndRecoveryOffer(cart_id: $id, expected_cart_version: $v) { outcome cart { wknd_cart_version applied_coupons { code } } } }';
+
+  beforeEach(async () => {
+    params = { ...READY, MCP_DELEGATION_ISSUER: MCP_ISSUER, MCP_DELEGATION_SECRET: SECRET };
+    await migrateLegacyPromotions(store);
+    await bootstrapRecoveryPromotion(store);
+    await enableRecovery();
+  });
+
+  async function delegated(query, variables = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    const assertion = await new SignJWT({
+      sub: SUB, identity_issuer: AUTH0_ISSUER, scope: 'shop:cart', jti: crypto.randomUUID(),
+    }).setProtectedHeader({ alg: 'HS256', typ: 'JWT' }).setIssuer(MCP_ISSUER)
+      .setAudience('urn:wknd-commerce:storefront').setIssuedAt(now).setExpirationTime(now + 60)
+      .sign(new TextEncoder().encode(SECRET));
+    const headers = { authorization: ['Bearer', assertion].join(' '), 'x-wknd-delegation': 'mcp' };
+    const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify });
+    return body;
+  }
+
+  /** Inactive (30h) signed-in cart, qty 2 of a pricey item; optional ordinary coupon. */
+  async function idleCart(coupon) {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    if (coupon) await gql(APPLY, { id, code: coupon });
+    await age(id, 30);
+    return id;
+  }
+  const version = async (id) => (await gql(VERSION, { id })).data.cart.wknd_cart_version;
+  const coupons = async (id) => (await store.collection('carts').findOne({ id })).coupons;
+  const entitlements = () => store.collection('recovery_entitlements').countDocuments({});
+
+  function interleave(id, next) {
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      carts.replaceOne = original;
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons: next, revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+  }
+
+  test('the cart exposes an opaque version that changes on every write', async () => {
+    const id = await idleCart();
+    const v1 = await version(id);
+    await gql(APPLY, { id, code: 'TRAILREADY' });
+    expect(await version(id)).not.toBe(v1);
+  });
+
+  test('replaces a smaller ordinary coupon (TRAILREADY) and claims the entitlement on the way', async () => {
+    const id = await idleCart('TRAILREADY');
+    const r = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    expect(r.outcome).toBe('APPLIED');
+    expect(r.cart.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    expect(r.cart.prices.discounts[0].amount.value).toBe(25);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+    const again = (await gql(APPLY_OFFER, { id, v: r.cart.wknd_cart_version })).data.applyWkndRecoveryOffer;
+    expect(again.outcome).toBe('ALREADY_APPLIED');
+  });
+
+  test('never downgrades: a better ordinary coupon (WKND10) is kept, nothing claimed', async () => {
+    const id = await idleCart('WKND10');
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('OFFER_NOT_BETTER');
+    expect(await coupons(id)).toEqual(['WKND10']);
+    expect(await entitlements()).toBe(0);
+  });
+
+  test('a better coupon applied after the final review is never replaced (stale version)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = await version(id);
+    await gql(APPLY, { id, code: 'WKND10' });
+    const r = await gql(APPLY_OFFER, { id, v: reviewed });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('a better coupon committed between the server read and write is never replaced', async () => {
+    const id = await idleCart('TRAILREADY');
+    interleave(id, ['WKND10']);
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('missing or malformed expected version is refused without a write', async () => {
+    const id = await idleCart('TRAILREADY');
+    const r = await gql(APPLY_OFFER, { id, v: 'v999' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+  });
+
+  test('an unavailable offer is an explicit error, not a silent no-op', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('RECOVERY_OFFER_UNAVAILABLE');
+  });
+
+  test('remove: only the protected coupon, at the reviewed version; entitlement kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const applied = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    const before = await store.collection('recovery_entitlements').find({});
+    const r = (await gql(REMOVE_OFFER, { id, v: applied.cart.wknd_cart_version })).data.removeWkndRecoveryOffer;
+    expect(r).toMatchObject({ outcome: 'REMOVED', cart: { applied_coupons: [] } });
+    expect(await store.collection('recovery_entitlements').find({})).toEqual(before);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
+
+  test('remove: an ordinary coupon is never removed (NOT_APPLIED, no write)', async () => {
+    const id = await idleCart('WKND10');
+    const v = await version(id);
+    const r = (await gql(REMOVE_OFFER, { id, v })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('NOT_APPLIED');
+    expect(r.cart.wknd_cart_version).toBe(v);
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('remove: an ordinary coupon that replaced the offer after review is kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    await gql(APPLY, { id, code: 'WKND10' });
+    expect((await gql(REMOVE_OFFER, { id, v: reviewed })).errors[0].extensions.code).toBe('CART_CHANGED');
+    const live = await version(id);
+    expect(await coupons(id)).toEqual(['WKND10']);
+    const r = (await gql(REMOVE_OFFER, { id, v: live })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('NOT_APPLIED');
+  });
+
+  test('remove: a replacement committed between the server read and write is kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const v = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    interleave(id, ['WKND10']);
+    expect((await gql(REMOVE_OFFER, { id, v })).errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('delegated agents: protected code only via the reviewed-version mutation; same customer and cart', async () => {
+    const id = await idleCart('TRAILREADY');
+    const generic = await delegated(APPLY, { id, code: 'recover10' });
+    expect(generic.errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+    const r = (await delegated(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    expect(r.outcome).toBe('APPLIED');
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+    expect((await delegated(APPLY, { id, code: 'WKND10' })).data.applyCouponToCart.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+  });
+
+  test('guests cannot apply or remove the offer', async () => {
+    const r = await gql(APPLY_OFFER, { id: 'x', v: 'v0' }, { auth: false });
+    expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
   });
 });

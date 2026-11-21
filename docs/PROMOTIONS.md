@@ -61,6 +61,20 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
   `removeCouponsFromCart(coupon_codes: [<that code>])`. If an ordinary coupon has replaced it, the
   call is a no-op. Never use `removeCouponFromCart`, which clears every coupon. Removing the
   coupon does not touch the shopper's entitlement or redemption records.
+- Reviewed-version offer writes (required for delegated agents; available to every signed-in
+  shopper):
+  - `Cart.wknd_cart_version` is an opaque token that changes on every cart write.
+  - `applyWkndRecoveryOffer(cart_id, expected_cart_version)` applies the offer only to that exact
+    reviewed cart, and only if the engine says it saves strictly more than the current promotion.
+    Errors: `OFFER_NOT_BETTER`, `CART_CHANGED`, `RECOVERY_OFFER_UNAVAILABLE`. It claims an
+    ELIGIBLE entitlement first, which is idempotent and is not a redemption.
+  - `removeWkndRecoveryOffer(cart_id, expected_cart_version)` removes only the protected coupon.
+    If another coupon is applied it returns `NOT_APPLIED` and writes nothing.
+  - Outcomes: `APPLIED`, `ALREADY_APPLIED`, `REMOVED`, `NOT_APPLIED`. Each returns the cart with
+    its new version.
+  - A delegated (LLM) caller applying a protected code through `applyCouponToCart` or
+    `applyCouponsToCart` is refused with `REVIEWED_VERSION_REQUIRED`. Ordinary coupons are
+    unaffected.
 
 ## Configuration
 

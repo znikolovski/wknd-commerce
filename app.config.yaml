@@ -34,6 +34,7 @@ application:
               ALLOW_INTROSPECTION: 'true'
               CATALOG_MAX_AGE: 60
               RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+              PROMOTION_SELECTION: $WKND_PROMOTION_SELECTION
             annotations:
               require-adobe-auth: false
               include-ims-credentials: true
@@ -64,6 +65,7 @@ application:
               MCP_PROMOTION_WRITES_ENABLED: $WKND_MCP_PROMOTION_WRITES_ENABLED
               PROMOTION_CURSOR_KEY: $WKND_PROMOTION_CURSOR_KEY
               RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+              PROMOTION_SELECTION: $WKND_PROMOTION_SELECTION
             annotations:
               require-adobe-auth: false
               include-ims-credentials: true
@@ -78,6 +80,7 @@ application:
             web: 'no'
             inputs:
               RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+              PROMOTION_SELECTION: $WKND_PROMOTION_SELECTION
             annotations:
               include-ims-credentials: true
             limits:

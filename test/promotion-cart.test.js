@@ -716,3 +716,146 @@ describe('reviewed-version recovery offer apply/remove (no-downgrade, changed-ca
     expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
   });
 });
+
+describe('mergeCarts: claim → apply once → retire (exactly-once, explicit errors)', () => {
+  const MERGE = 'mutation($s: String!, $d: String) { mergeCarts(source_cart_id: $s, destination_cart_id: $d) { id items { quantity product { sku } } } }';
+  const extra = simples.find((p) => p.sku !== cheap.sku && p.sku !== pricey.sku);
+  const carts = () => store.collection('carts');
+
+  async function guestCart(items) {
+    const id = (await gql('mutation { createGuestCart { cart { id } } }', {}, { auth: false })).data.createGuestCart.cart.id;
+    for (const [sku, qty] of items) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await gql(ADD, { id, sku, qty }, { auth: false })).errors).toBeUndefined();
+    }
+    return id;
+  }
+  async function setup() {
+    const dest = await customerCartId();
+    await gql(ADD, { id: dest, sku: pricey.sku, qty: 1 });
+    const src = await guestCart([[cheap.sku, 2]]);
+    return { dest, src };
+  }
+  const qty = async (id, sku) => ((await carts().findOne({ id })).items.find((i) => i.sku === sku)?.quantity) || 0;
+  const status = async (id) => (await carts().findOne({ id })).status;
+  const merge = (src, dest) => gql(MERGE, { s: src, d: dest });
+
+  /** Runs `fn` once, just before the first carts.updateOne matching `when`, then restores. */
+  function beforeUpdate(when, fn) {
+    const original = carts().updateOne.bind(carts());
+    const coll = carts();
+    coll.updateOne = async (filter, update, options) => {
+      if (when(filter, update)) {
+        coll.updateOne = original;
+        await fn(original, filter, update);
+      }
+      return original(filter, update, options);
+    };
+    return () => { coll.updateOne = original; };
+  }
+
+  test('merges once; a repeated request adds nothing', async () => {
+    const { dest, src } = await setup();
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+  });
+
+  test('a source changed after it was read is re-read and claimed whole (nothing lost)', async () => {
+    const { dest, src } = await setup();
+    beforeUpdate((f, u) => f.id === src && f.status === 'active' && u.$set?.status === 'merging', async (original) => {
+      const live = await carts().findOne({ id: src });
+      await original({ id: src }, { $set: { items: [...live.items, { uid: 'x1', sku: extra.sku, parentSku: extra.sku, quantity: 1 }], revision: (live.revision || 0) + 1 } });
+    });
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await qty(dest, extra.sku)).toBe(1);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a claimed source cannot be edited (no change slips in after the snapshot)', async () => {
+    const { dest, src } = await setup();
+    let edit;
+    beforeUpdate((f, u) => f.id === src && u.$set?.status === 'merged', async () => {
+      edit = await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false });
+    });
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(edit.errors[0].message).toMatch(/isn't active/);
+    expect(await qty(dest, extra.sku)).toBe(0);
+  });
+
+  test('concurrent merges of the same source add its items exactly once', async () => {
+    const { dest, src } = await setup();
+    const results = await Promise.all([merge(src, dest), merge(src, dest), merge(src, dest)]);
+    results.filter((r) => r.errors).forEach((r) => expect(r.errors[0].extensions.code).toBe('CART_CHANGED'));
+    expect(results.some((r) => !r.errors)).toBe(true);
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a second merge arriving after the first committed the destination but before retirement adds nothing', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const upd = coll.updateOne.bind(coll);
+    const rep = coll.replaceOne.bind(coll);
+    let second;
+    const restore = () => { coll.updateOne = upd; coll.replaceOne = rep; };
+    const interject = async () => { restore(); second = await merge(src, dest); };
+    coll.updateOne = async (f, u, o) => { if (f.id === src && u.$set?.status === 'merged') await interject(); return upd(f, u, o); };
+    coll.replaceOne = async (f, d, o) => { if (d?.id === src && d.status === 'merged') await interject(); return rep(f, d, o); };
+    const first = await merge(src, dest);
+    [first, second].filter((r) => r.errors).forEach((r) => expect(r.errors[0].extensions.code).toBe('CART_CHANGED'));
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('concurrent merges of two sources into one destination keep both', async () => {
+    const dest = await customerCartId();
+    const a = await guestCart([[cheap.sku, 1]]);
+    const b = await guestCart([[extra.sku, 1]]);
+    const results = await Promise.all([merge(a, dest), merge(b, dest)]);
+    results.forEach((r) => expect(r.errors).toBeUndefined());
+    expect(await qty(dest, cheap.sku)).toBe(1);
+    expect(await qty(dest, extra.sku)).toBe(1);
+  });
+
+  test('retirement failure is an explicit error; the repeated request completes without duplicates', async () => {
+    const { dest, src } = await setup();
+    beforeUpdate((f, u) => f.id === src && u.$set?.status === 'merged', async () => { throw new Error('db unavailable'); });
+    const first = await merge(src, dest);
+    expect(first.errors).toBeDefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merging');
+    const second = await merge(src, dest);
+    expect(second.errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a failed destination write releases the source intact; retry merges once', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    coll.replaceOne = async (filter) => { coll.replaceOne = original; if (filter.id === dest) throw new Error('db unavailable'); return original(filter); };
+    const first = await merge(src, dest);
+    expect(first.errors).toBeDefined();
+    expect(await status(src)).toBe('active');
+    expect(await qty(src, cheap.sku)).toBe(2);
+    expect(await qty(dest, cheap.sku)).toBe(0);
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+  });
+
+  test('a merge abandoned on a destination that was ordered is reclaimed by the new destination', async () => {
+    const { dest, src } = await setup();
+    await carts().updateOne({ id: src }, { $set: { status: 'merging', mergingInto: dest, mergeId: 'stale' } });
+    await carts().updateOne({ id: dest }, { $set: { status: 'ordered' } });
+    const next = await customerCartId();
+    expect(next).not.toBe(dest);
+    expect((await merge(src, next)).errors).toBeUndefined();
+    expect(await qty(next, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+});

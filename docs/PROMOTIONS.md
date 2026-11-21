@@ -82,6 +82,15 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
       fresh read (up to 3 attempts). They never set coupons, so they cannot overwrite a guarded
       coupon change.
     - Each write bumps `wknd_cart_version`.
+  - `mergeCarts` runs exactly once, without multi-document transactions:
+    1. Claim the source with a revision compare-and-set. Its status becomes `merging`, which makes
+       it inactive and unchangeable.
+    2. Add that snapshot to the destination once. The merge is recorded in `mergedSources`.
+    3. Retire the source to `merged`.
+
+    Every failure is an explicit error. If step 2 fails, the source is released. If step 3 fails,
+    the claim stays in place, and a repeated request finishes the merge without adding the items
+    again.
 
 ## Configuration
 

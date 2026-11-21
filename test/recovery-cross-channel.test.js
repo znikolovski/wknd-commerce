@@ -50,6 +50,8 @@ const APPLY = 'mutation($id: String!, $code: String!) { applyCouponToCart(input:
 const OFFER = 'query($id: String!) { wkndRecoveryOffer(cart_id: $id) { status coupon_code } }';
 const CLAIM = 'mutation($id: String!) { claimWkndRecoveryOffer(cart_id: $id) { status coupon_code } }';
 const PLACE = 'mutation($id: String!) { placeOrder(input: { cart_id: $id }) { errors { code message } orderV2 { number } } }';
+const VERSION = 'query($id: String!) { cart(cart_id: $id) { wknd_cart_version } }';
+const APPLY_OFFER = 'mutation($id: String!, $v: String!) { applyWkndRecoveryOffer(cart_id: $id, expected_cart_version: $v) { outcome cart { applied_coupons { code } } } }';
 
 let store;
 
@@ -117,6 +119,12 @@ async function chatPlace(id, claims = {}) {
 
 const count = (name) => store.collection(name).countDocuments({});
 
+/** The delegated channel applies the protected offer only via the reviewed-version mutation. */
+async function chatApplyOffer(id) {
+  const v = (await chat(VERSION, { id })).data.cart.wknd_cart_version;
+  return chat(APPLY_OFFER, { id, v });
+}
+
 beforeEach(async () => {
   resetCatalogCache();
   store = createMemoryStore();
@@ -140,7 +148,7 @@ describe('same verified shopper across website and delegated channel', () => {
   test('delegated redemption is keyed by the existing recovery shopperKey and blocks the website', async () => {
     const id = await idleCart(chat);
     expect((await chat(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
-    expect((await chat(APPLY, { id, code: 'RECOVER10' })).data.applyCouponToCart.cart.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    expect((await chatApplyOffer(id)).data.applyWkndRecoveryOffer).toEqual({ outcome: 'APPLIED', cart: { applied_coupons: [{ code: 'RECOVER10' }] } });
     await readyForCheckout(chat, id);
     const placed = await chatPlace(id);
     expect(placed.data.placeOrder.errors).toEqual([]);
@@ -169,7 +177,8 @@ describe('same verified shopper across website and delegated channel', () => {
     const next = await idleCart(chat);
     expect((await chat(OFFER, { id: next })).data.wkndRecoveryOffer.status).toBe('REDEEMED');
     expect((await chat(CLAIM, { id: next })).data.claimWkndRecoveryOffer.status).toBe('REDEEMED');
-    expect((await chat(APPLY, { id: next, code: 'RECOVER10' })).errors[0].message).toBe('This offer has already been used.');
+    expect((await chat(APPLY, { id: next, code: 'RECOVER10' })).errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect((await chatApplyOffer(next)).errors[0].extensions.code).toBe('RECOVERY_OFFER_UNAVAILABLE');
   });
 
   test('website and delegated checkouts racing on two carts redeem at most once', async () => {
@@ -181,7 +190,8 @@ describe('same verified shopper across website and delegated channel', () => {
       // eslint-disable-next-line no-await-in-loop
       expect((await via(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
       // eslint-disable-next-line no-await-in-loop
-      await via(APPLY, { id, code: 'RECOVER10' });
+      const applied = via === chat ? (await chatApplyOffer(id)).data.applyWkndRecoveryOffer.cart : (await via(APPLY, { id, code: 'RECOVER10' })).data.applyCouponToCart.cart;
+      expect(applied.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
       // eslint-disable-next-line no-await-in-loop
       await readyForCheckout(via, id);
     }

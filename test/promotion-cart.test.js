@@ -5,11 +5,13 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { SignJWT } = require('jose');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const { runGraphQL } = require('../lib/graphql-server');
 const { resetCatalogCache, loadCatalog } = require('../lib/catalog');
 const { placeOrder } = require('../lib/orders');
+const { saveCart } = require('../lib/cart');
 const {
   migrateLegacyPromotions, createPromotionService, loadPromotionRuntime, LEGACY_SEEDS,
 } = require('../lib/promotions');
@@ -379,5 +381,546 @@ describe('protected cart recovery', () => {
     inventory.updateOne = original;
     expect(placed.data.placeOrder.orderV2).toBeNull();
     expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+  });
+});
+
+describe('coupon writes are revision-guarded (protected-offer removal / no-downgrade races)', () => {
+  const REMOVE = 'mutation Remove($id: String!, $code: String!) { removeCouponsFromCart(input: { cart_id: $id, coupon_codes: [$code] }) { cart { applied_coupons { code } } } }';
+
+  beforeEach(async () => {
+    await migrateLegacyPromotions(store);
+    await bootstrapRecoveryPromotion(store);
+    await enableRecovery();
+  });
+
+  async function protectedCart() {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    await age(id, 30);
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    expect((await gql(APPLY, { id, code: 'RECOVER10' })).data.applyCouponToCart.cart.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    return id;
+  }
+
+  test('a stale write is refused with CART_CHANGED and never erases a concurrent coupon', async () => {
+    const id = await protectedCart();
+    const stale = await store.collection('carts').findOne({ id });
+    await gql(APPLY, { id, code: 'WKND10' });
+    await expect(saveCart(store, { ...stale, coupons: [] }, { expectRevision: true }))
+      .rejects.toMatchObject({ code: 'CART_CHANGED' });
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['WKND10']);
+  });
+
+  test('removing the protected code after another channel replaced it leaves the ordinary coupon', async () => {
+    const id = await protectedCart();
+    await gql(APPLY, { id, code: 'WKND10' });
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.removeCouponsFromCart.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+  });
+
+  /** Commits another channel's coupon between this mutation's read and its write. */
+  function interleave(id, coupons) {
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      carts.replaceOne = original;
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons, revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+  }
+
+  test('removal racing an ordinary coupon applied in between: refused, ordinary coupon kept', async () => {
+    const id = await protectedCart();
+    interleave(id, ['WKND10']);
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['WKND10']);
+  });
+
+  test('protected apply racing an ordinary coupon applied in between: refused, no silent replace', async () => {
+    const id = await protectedCart();
+    await gql(REMOVE, { id, code: 'RECOVER10' });
+    interleave(id, ['TRAILREADY']);
+    const r = await gql(APPLY, { id, code: 'RECOVER10' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['TRAILREADY']);
+  });
+
+  test('removing the protected coupon leaves the entitlement and redemption untouched', async () => {
+    const id = await protectedCart();
+    const before = await store.collection('recovery_entitlements').find({});
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.data.removeCouponsFromCart.cart.applied_coupons).toEqual([]);
+    expect(await store.collection('recovery_entitlements').find({})).toEqual(before);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
+});
+
+describe('reviewed-version recovery offer apply/remove (no-downgrade, changed-cart guard)', () => {
+  const MCP_ISSUER = 'https://example.adobeio-static.net/api/v1/web/llm-apps/mcp';
+  const SECRET = 'test-only-mcp-delegation-secret-of-32-bytes+';
+  const VERSION = 'query($id: String!) { cart(cart_id: $id) { wknd_cart_version applied_coupons { code } } }';
+  const APPLY_OFFER = 'mutation($id: String!, $v: String!) { applyWkndRecoveryOffer(cart_id: $id, expected_cart_version: $v) { outcome cart { wknd_cart_version applied_coupons { code } prices { discounts { amount { value } } } } } }';
+  const REMOVE_OFFER = 'mutation($id: String!, $v: String!) { removeWkndRecoveryOffer(cart_id: $id, expected_cart_version: $v) { outcome cart { wknd_cart_version applied_coupons { code } } } }';
+
+  beforeEach(async () => {
+    params = { ...READY, MCP_DELEGATION_ISSUER: MCP_ISSUER, MCP_DELEGATION_SECRET: SECRET };
+    await migrateLegacyPromotions(store);
+    await bootstrapRecoveryPromotion(store);
+    await enableRecovery();
+  });
+
+  async function delegated(query, variables = {}) {
+    const now = Math.floor(Date.now() / 1000);
+    const assertion = await new SignJWT({
+      sub: SUB, identity_issuer: AUTH0_ISSUER, scope: 'shop:cart', jti: crypto.randomUUID(),
+    }).setProtectedHeader({ alg: 'HS256', typ: 'JWT' }).setIssuer(MCP_ISSUER)
+      .setAudience('urn:wknd-commerce:storefront').setIssuedAt(now).setExpirationTime(now + 60)
+      .sign(new TextEncoder().encode(SECRET));
+    const headers = { authorization: ['Bearer', assertion].join(' '), 'x-wknd-delegation': 'mcp' };
+    const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify });
+    return body;
+  }
+
+  /** Inactive (30h) signed-in cart, qty 2 of a pricey item; optional ordinary coupon. */
+  async function idleCart(coupon) {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    if (coupon) await gql(APPLY, { id, code: coupon });
+    await age(id, 30);
+    return id;
+  }
+  const version = async (id) => (await gql(VERSION, { id })).data.cart.wknd_cart_version;
+  const coupons = async (id) => (await store.collection('carts').findOne({ id })).coupons;
+  const entitlements = () => store.collection('recovery_entitlements').countDocuments({});
+
+  function interleave(id, next) {
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      carts.replaceOne = original;
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons: next, revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+  }
+
+  test('the cart exposes an opaque version that changes on every write', async () => {
+    const id = await idleCart();
+    const v1 = await version(id);
+    await gql(APPLY, { id, code: 'TRAILREADY' });
+    expect(await version(id)).not.toBe(v1);
+  });
+
+  test('replaces a smaller ordinary coupon (TRAILREADY) and claims the entitlement on the way', async () => {
+    const id = await idleCart('TRAILREADY');
+    const r = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    expect(r.outcome).toBe('APPLIED');
+    expect(r.cart.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    expect(r.cart.prices.discounts[0].amount.value).toBe(25);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+    const again = (await gql(APPLY_OFFER, { id, v: r.cart.wknd_cart_version })).data.applyWkndRecoveryOffer;
+    expect(again.outcome).toBe('ALREADY_APPLIED');
+  });
+
+  test('never downgrades: a better ordinary coupon (WKND10) is kept, nothing claimed', async () => {
+    const id = await idleCart('WKND10');
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('OFFER_NOT_BETTER');
+    expect(await coupons(id)).toEqual(['WKND10']);
+    expect(await entitlements()).toBe(0);
+  });
+
+  test('a better coupon applied after the final review is never replaced (stale version)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = await version(id);
+    await gql(APPLY, { id, code: 'WKND10' });
+    const r = await gql(APPLY_OFFER, { id, v: reviewed });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('a better coupon committed between the server read and write is never replaced', async () => {
+    const id = await idleCart('TRAILREADY');
+    interleave(id, ['WKND10']);
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('missing or malformed expected version is refused without a write', async () => {
+    const id = await idleCart('TRAILREADY');
+    const r = await gql(APPLY_OFFER, { id, v: 'v999' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+  });
+
+  test('an unavailable offer is an explicit error, not a silent no-op', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    const r = await gql(APPLY_OFFER, { id, v: await version(id) });
+    expect(r.errors[0].extensions.code).toBe('RECOVERY_OFFER_UNAVAILABLE');
+  });
+
+  test('remove: only the protected coupon, at the reviewed version; entitlement kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const applied = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    const before = await store.collection('recovery_entitlements').find({});
+    const r = (await gql(REMOVE_OFFER, { id, v: applied.cart.wknd_cart_version })).data.removeWkndRecoveryOffer;
+    expect(r).toMatchObject({ outcome: 'REMOVED', cart: { applied_coupons: [] } });
+    expect(await store.collection('recovery_entitlements').find({})).toEqual(before);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
+
+  test('remove: an ordinary coupon is never removed (NOT_APPLIED, no write)', async () => {
+    const id = await idleCart('WKND10');
+    const v = await version(id);
+    const r = (await gql(REMOVE_OFFER, { id, v })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('NOT_APPLIED');
+    expect(r.cart.wknd_cart_version).toBe(v);
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('remove: an ordinary coupon that replaced the offer after review is kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    await gql(APPLY, { id, code: 'WKND10' });
+    expect((await gql(REMOVE_OFFER, { id, v: reviewed })).errors[0].extensions.code).toBe('CART_CHANGED');
+    const live = await version(id);
+    expect(await coupons(id)).toEqual(['WKND10']);
+    const r = (await gql(REMOVE_OFFER, { id, v: live })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('NOT_APPLIED');
+  });
+
+  test('remove: a replacement committed between the server read and write is kept', async () => {
+    const id = await idleCart('TRAILREADY');
+    const v = (await gql(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    interleave(id, ['WKND10']);
+    expect((await gql(REMOVE_OFFER, { id, v })).errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['WKND10']);
+  });
+
+  test('delegated agents: protected code only via the reviewed-version mutation; same customer and cart', async () => {
+    const id = await idleCart('TRAILREADY');
+    const generic = await delegated(APPLY, { id, code: 'recover10' });
+    expect(generic.errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+    const r = (await delegated(APPLY_OFFER, { id, v: await version(id) })).data.applyWkndRecoveryOffer;
+    expect(r.outcome).toBe('APPLIED');
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+    expect((await delegated(APPLY, { id, code: 'WKND10' })).data.applyCouponToCart.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+  });
+
+  test('guests cannot apply or remove the offer', async () => {
+    const r = await gql(APPLY_OFFER, { id: 'x', v: 'v0' }, { auth: false });
+    expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
+  });
+
+  test('reviewed version is invalidated by any cart change (item edit after review)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = await version(id);
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    await age(id, 30);
+    const r = await gql(APPLY_OFFER, { id, v: reviewed });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+  });
+
+  const SHIP = 'mutation($id: String!) { setShippingAddressesOnCart(input: { cart_id: $id, shipping_addresses: [{ address: { firstname: "Sam", lastname: "S", street: ["1 Trail St"], city: "Sydney", postcode: "2000", telephone: "0400000000", country_code: "AU", region: "NSW" } }] }) { cart { wknd_cart_version applied_coupons { code } } } }';
+
+  test.each([
+    ['setShippingAddressesOnCart', (id) => gql(SHIP, { id })],
+    ['addProductsToCart', (id) => gql(ADD, { id, sku: cheap.sku, qty: 1 })],
+  ])('%s racing a guarded coupon write keeps that coupon and still applies its own change', async (_, write) => {
+    const id = await idleCart('TRAILREADY');
+    const before = await store.collection('carts').findOne({ id });
+    interleave(id, ['RECOVER10']);
+    const r = await write(id);
+    expect(r.errors).toBeUndefined();
+    const after = await store.collection('carts').findOne({ id });
+    expect(after.coupons).toEqual(['RECOVER10']);
+    expect(after.revision).toBeGreaterThanOrEqual((before.revision || 0) + 2);
+    expect(JSON.stringify(after.shippingAddress || after.items.length)).not.toBe(JSON.stringify(before.shippingAddress || before.items.length));
+  });
+
+  test('stale item/address save after a guarded coupon CAS: coupon kept, versions strictly increase (no ABA)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const seen = [await version(id)];
+    const num = (v) => Number(v.slice(1));
+    const applied = (await gql(APPLY_OFFER, { id, v: seen[0] })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    seen.push(applied);
+    interleave(id, ['RECOVER10']);
+    const shipped = (await gql(SHIP, { id })).data.setShippingAddressesOnCart.cart;
+    seen.push(shipped.wknd_cart_version);
+    expect(shipped.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    const removed = (await gql(REMOVE_OFFER, { id, v: shipped.wknd_cart_version })).data.removeWkndRecoveryOffer;
+    seen.push(removed.cart.wknd_cart_version);
+    interleave(id, ['WKND10']);
+    const added = (await gql(ADD, { id, sku: cheap.sku, qty: 1 })).data.addProductsToCart.cart;
+    expect(added.applied_coupons).toEqual([{ code: 'WKND10' }]);
+    seen.push(await version(id));
+    seen.map(num).reduce((prev, n) => { expect(n).toBeGreaterThan(prev); return n; }, -1);
+    expect(new Set(seen).size).toBe(seen.length);
+    // an old reviewed version can never become valid again
+    expect((await gql(APPLY_OFFER, { id, v: applied })).errors[0].extensions.code).toBe('CART_CHANGED');
+  });
+
+  test('normal checkout validation errors are unchanged by the retrying writers', async () => {
+    const id = await idleCart();
+    const r = await gql('mutation($id: String!) { setShippingMethodsOnCart(input: { cart_id: $id, shipping_methods: [{ carrier_code: "x", method_code: "y" }] }) { cart { id } } }', { id });
+    expect(r.errors[0].message).toBe('The shipping address is missing. Set the address and try again.');
+    const p = await gql('mutation($id: String!) { setPaymentMethodOnCart(input: { cart_id: $id, payment_method: { code: "nope" } }) { cart { id } } }', { id });
+    expect(p.errors[0].message).toBe('The requested Payment Method is not available.');
+  });
+
+  test('a writer that keeps losing the race surfaces CART_CHANGED and writes nothing stale', async () => {
+    const id = await idleCart('TRAILREADY');
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons: ['WKND10'], revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+    const r = await gql(SHIP, { id });
+    carts.replaceOne = original;
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    const after = await carts.findOne({ id });
+    expect(after.coupons).toEqual(['WKND10']);
+    expect(after.shippingAddress ?? null).toBeNull();
+  });
+
+  test('delegated agents: protected removal only via the reviewed-version mutation', async () => {
+    const id = await idleCart('TRAILREADY');
+    await gql(APPLY_OFFER, { id, v: await version(id) });
+    const REMOVE_ONE = 'mutation($id: String!) { removeCouponFromCart(input: { cart_id: $id }) { cart { applied_coupons { code } } } }';
+    const REMOVE_SOME = 'mutation($id: String!, $codes: [String!]!) { removeCouponsFromCart(input: { cart_id: $id, coupon_codes: $codes }) { cart { applied_coupons { code } } } }';
+    expect((await delegated(REMOVE_ONE, { id })).errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect((await delegated(REMOVE_SOME, { id, codes: ['RECOVER10'] })).errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect(await coupons(id)).toEqual(['RECOVER10']);
+    const r = (await delegated(REMOVE_OFFER, { id, v: await version(id) })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('REMOVED');
+    await gql(APPLY, { id, code: 'WKND10' });
+    expect((await delegated(REMOVE_SOME, { id, codes: ['WKND10'] })).data.removeCouponsFromCart.cart.applied_coupons).toEqual([]);
+  });
+
+  test('website ordinary coupon removal is unchanged (clear-all still works)', async () => {
+    const id = await idleCart('TRAILREADY');
+    await gql(APPLY_OFFER, { id, v: await version(id) });
+    const r = await gql('mutation($id: String!) { removeCouponFromCart(input: { cart_id: $id }) { cart { applied_coupons { code } } } }', { id });
+    expect(r.data.removeCouponFromCart.cart.applied_coupons).toEqual([]);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
+});
+
+describe('mergeCarts: claim → apply once → retire (exactly-once, explicit errors)', () => {
+  const MERGE = 'mutation($s: String!, $d: String) { mergeCarts(source_cart_id: $s, destination_cart_id: $d) { id items { quantity product { sku } } } }';
+  const extra = simples.find((p) => p.sku !== cheap.sku && p.sku !== pricey.sku);
+  const carts = () => store.collection('carts');
+
+  async function guestCart(items) {
+    const id = (await gql('mutation { createGuestCart { cart { id } } }', {}, { auth: false })).data.createGuestCart.cart.id;
+    for (const [sku, qty] of items) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await gql(ADD, { id, sku, qty }, { auth: false })).errors).toBeUndefined();
+    }
+    return id;
+  }
+  async function setup() {
+    const dest = await customerCartId();
+    await gql(ADD, { id: dest, sku: pricey.sku, qty: 1 });
+    const src = await guestCart([[cheap.sku, 2]]);
+    return { dest, src };
+  }
+  const qty = async (id, sku) => ((await carts().findOne({ id })).items.find((i) => i.sku === sku)?.quantity) || 0;
+  const status = async (id) => (await carts().findOne({ id })).status;
+  const merge = (src, dest) => gql(MERGE, { s: src, d: dest });
+
+  /** Runs `fn` once, just before the first carts.updateOne matching `when`, then restores. */
+  function beforeUpdate(when, fn) {
+    const original = carts().updateOne.bind(carts());
+    const coll = carts();
+    coll.updateOne = async (filter, update, options) => {
+      if (when(filter, update)) {
+        coll.updateOne = original;
+        await fn(original, filter, update);
+      }
+      return original(filter, update, options);
+    };
+    return () => { coll.updateOne = original; };
+  }
+
+  test('merges once; a repeated request adds nothing', async () => {
+    const { dest, src } = await setup();
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+  });
+
+  test('a source changed after it was read is re-read and claimed whole (nothing lost)', async () => {
+    const { dest, src } = await setup();
+    beforeUpdate((f, u) => f.id === src && f.status === 'active' && u.$set?.status === 'merging', async (original) => {
+      const live = await carts().findOne({ id: src });
+      await original({ id: src }, { $set: { items: [...live.items, { uid: 'x1', sku: extra.sku, parentSku: extra.sku, quantity: 1 }], revision: (live.revision || 0) + 1 } });
+    });
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await qty(dest, extra.sku)).toBe(1);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a claimed source cannot be edited (no change slips in after the snapshot)', async () => {
+    const { dest, src } = await setup();
+    let edit;
+    beforeUpdate((f, u) => f.id === src && u.$set?.status === 'merged', async () => {
+      edit = await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false });
+    });
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(edit.errors[0].message).toMatch(/isn't active/);
+    expect(await qty(dest, extra.sku)).toBe(0);
+  });
+
+  test('concurrent merges of the same source add its items exactly once', async () => {
+    const { dest, src } = await setup();
+    const results = await Promise.all([merge(src, dest), merge(src, dest), merge(src, dest)]);
+    results.filter((r) => r.errors).forEach((r) => expect(r.errors[0].extensions.code).toBe('CART_CHANGED'));
+    expect(results.some((r) => !r.errors)).toBe(true);
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a second merge arriving after the first committed the destination but before retirement adds nothing', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const upd = coll.updateOne.bind(coll);
+    const rep = coll.replaceOne.bind(coll);
+    let second;
+    const restore = () => { coll.updateOne = upd; coll.replaceOne = rep; };
+    const interject = async () => { restore(); second = await merge(src, dest); };
+    coll.updateOne = async (f, u, o) => { if (f.id === src && u.$set?.status === 'merged') await interject(); return upd(f, u, o); };
+    coll.replaceOne = async (f, d, o) => { if (d?.id === src && d.status === 'merged') await interject(); return rep(f, d, o); };
+    const first = await merge(src, dest);
+    [first, second].filter((r) => r.errors).forEach((r) => expect(r.errors[0].extensions.code).toBe('CART_CHANGED'));
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('concurrent merges of two sources into one destination keep both', async () => {
+    const dest = await customerCartId();
+    const a = await guestCart([[cheap.sku, 1]]);
+    const b = await guestCart([[extra.sku, 1]]);
+    const results = await Promise.all([merge(a, dest), merge(b, dest)]);
+    results.forEach((r) => expect(r.errors).toBeUndefined());
+    expect(await qty(dest, cheap.sku)).toBe(1);
+    expect(await qty(dest, extra.sku)).toBe(1);
+  });
+
+  test('retirement failure is an explicit error; the repeated request completes without duplicates', async () => {
+    const { dest, src } = await setup();
+    beforeUpdate((f, u) => f.id === src && u.$set?.status === 'merged', async () => { throw new Error('db unavailable'); });
+    const first = await merge(src, dest);
+    expect(first.errors).toBeDefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merging');
+    const second = await merge(src, dest);
+    expect(second.errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a failed destination write keeps the claim (never reactivated); the repeat merges once', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    coll.replaceOne = async (filter, doc, o) => { coll.replaceOne = original; if (filter.id === dest) throw new Error('db unavailable'); return original(filter, doc, o); };
+    const first = await merge(src, dest);
+    expect(first.errors).toBeDefined();
+    expect(await status(src)).toBe('merging');
+    expect(await qty(dest, cheap.sku)).toBe(0);
+    expect((await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false })).errors[0].message).toMatch(/isn't active/);
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await qty(dest, extra.sku)).toBe(0);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a destination write that committed but then threw (uncertain outcome): the repeat adds nothing', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    coll.replaceOne = async (filter, doc, o) => {
+      if (filter.id !== dest) return original(filter, doc, o);
+      coll.replaceOne = original;
+      await original(filter, doc, o);
+      throw new Error('timeout after commit');
+    };
+    expect((await merge(src, dest)).errors).toBeDefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merging');
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('A fails its destination write while B (paused before its write) resumes; a source edit then is refused, nothing lost', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    let destWrites = 0;
+    let bPromise;
+    let releaseB;
+    let bAtWrite;
+    const bReady = new Promise((r) => { bAtWrite = r; });
+    coll.replaceOne = async (filter, doc, o) => {
+      if (filter.id !== dest) return original(filter, doc, o);
+      destWrites += 1;
+      if (destWrites === 1) {
+        // A's write: let B load the (same) claim and destination and stop just before its write.
+        bPromise = merge(src, dest);
+        await bReady;
+        throw new Error('db unavailable');
+      }
+      if (destWrites === 2) {
+        bAtWrite();
+        await new Promise((r) => { releaseB = r; });
+      }
+      return original(filter, doc, o);
+    };
+    const a = await merge(src, dest);
+    expect(a.errors).toBeDefined();
+    const statusAfterA = await status(src);
+    const edit = await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false });
+    releaseB();
+    const b = await bPromise;
+    coll.replaceOne = original;
+    const repeat = await merge(src, dest);
+    const srcDoc = await carts().findOne({ id: src });
+    const editAccepted = !edit.errors;
+    // never reactivated, so the edit is refused; and nothing accepted is ever lost or duplicated
+    expect(statusAfterA).toBe('merging');
+    expect(editAccepted).toBe(false);
+    expect(b.errors).toBeUndefined();
+    expect(repeat.errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    const sourceExtra = srcDoc.items.find((i) => i.sku === extra.sku)?.quantity || 0;
+    expect(await qty(dest, extra.sku)).toBe(sourceExtra);
+    expect(srcDoc.status).toBe('merged');
+  });
+
+  test('a merge abandoned on a destination that was ordered is reclaimed by the new destination', async () => {
+    const { dest, src } = await setup();
+    await carts().updateOne({ id: src }, { $set: { status: 'merging', mergingInto: dest, mergeId: 'stale' } });
+    await carts().updateOne({ id: dest }, { $set: { status: 'ordered' } });
+    const next = await customerCartId();
+    expect(next).not.toBe(dest);
+    expect((await merge(src, next)).errors).toBeUndefined();
+    expect(await qty(next, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
   });
 });

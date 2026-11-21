@@ -52,6 +52,46 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 - When available, the offer also returns `saving` (what the offer would take off the cart now) and
   `current_saving` (what the currently applied promotion takes off), both from the shared engine.
   They are display-only estimates; storefronts show the offer only when `saving > current_saving`.
+- Coupon writes (`applyCouponToCart`, `applyCouponsToCart`, `removeCouponFromCart`,
+  `removeCouponsFromCart`) save only against the cart revision they read. If another channel
+  changed the cart in between, the write is refused with a GraphQL error whose
+  `extensions.code` is `CART_CHANGED`. Nothing is overwritten. The client re-reads the cart and
+  decides again; it must not retry blindly.
+- To withdraw only the protected recovery coupon, call
+  `removeCouponsFromCart(coupon_codes: [<that code>])`. If an ordinary coupon has replaced it, the
+  call is a no-op. Never use `removeCouponFromCart`, which clears every coupon. Removing the
+  coupon does not touch the shopper's entitlement or redemption records.
+- Reviewed-version offer writes (required for delegated agents; available to every signed-in
+  shopper):
+  - `Cart.wknd_cart_version` is an opaque token that changes on every cart write.
+  - `applyWkndRecoveryOffer(cart_id, expected_cart_version)` applies the offer only to that exact
+    reviewed cart, and only if the engine says it saves strictly more than the current promotion.
+    Errors: `OFFER_NOT_BETTER`, `CART_CHANGED`, `RECOVERY_OFFER_UNAVAILABLE`. It claims an
+    ELIGIBLE entitlement first, which is idempotent and is not a redemption.
+  - `removeWkndRecoveryOffer(cart_id, expected_cart_version)` removes only the protected coupon.
+    If another coupon is applied it returns `NOT_APPLIED` and writes nothing.
+  - Outcomes: `APPLIED`, `ALREADY_APPLIED`, `REMOVED`, `NOT_APPLIED`. Each returns the cart with
+    its new version.
+  - A delegated (LLM) caller that tries to apply or remove a protected code through the generic
+    coupon mutations is refused with `REVIEWED_VERSION_REQUIRED`. Removing a discount can raise
+    what the shopper pays, so both directions need the reviewed version. Ordinary coupons and
+    website callers are unaffected.
+  - Every cart write uses the revision compare-and-set:
+    - Coupon writes surface `CART_CHANGED`.
+    - Item, address, shipping, payment, merge and reorder writes re-apply their own change to a
+      fresh read (up to 3 attempts). They never set coupons, so they cannot overwrite a guarded
+      coupon change.
+    - Each write bumps `wknd_cart_version`.
+  - `mergeCarts` runs exactly once, without multi-document transactions:
+    1. Claim the source with a revision compare-and-set. Its status becomes `merging`, which makes
+       it inactive and unchangeable.
+    2. Add that snapshot to the destination once. The merge is recorded in `mergedSources`.
+    3. Retire the source to `merged`.
+
+    Every failure is an explicit error, and a claimed source is never reactivated. After a failed
+    or uncertain step 2 or 3 the claim stays in place, and a repeated request completes the merge
+    exactly once. A claim left on a destination that is no longer active is reclaimed by the
+    shopper's next cart.
 
 ## Configuration
 

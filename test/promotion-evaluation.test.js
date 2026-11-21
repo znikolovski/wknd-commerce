@@ -212,3 +212,51 @@ describe('wknd.promotions/v1 golden evaluation', () => {
     });
   });
 });
+
+describe('wknd.promotions/v2 best-saving selection gate', () => {
+  const lines = [{ id: 'l1', sku: 'GEAR-PACK', parentSku: 'GEAR-PACK', categories: ['gear/packs'], grossMinor: 30000 }];
+  const legacy = {
+    ...DEFS.F20, id: id('20'), code: 'TRAILREADY', minimumMerchandiseMinor: 50000, private: { legacyMinimumOnlyAcceptance: true },
+  };
+  const run = (explicitCode, promotions, selection) => evaluatePromotions({
+    promotions, lines, explicitCode, nowMs: Date.UTC(2026, 10, 21), selection,
+  });
+
+  test('default (v1 explicit-first) keeps the coupon even when an automatic saves more', () => {
+    const r = run('FIX20', [DEFS.F20, DEFS.A02]);
+    expect(r).toMatchObject({ selected: { id: DEFS.F20.id }, discountMinor: 2000, coupon: { code: 'FIX20', status: 'applied' } });
+    expect(run('FIX20', [DEFS.F20, DEFS.A02], 'unknown-mode').selected.id).toBe(DEFS.F20.id);
+  });
+
+  test('best-saving applies the larger automatic and marks the coupon superseded', () => {
+    const r = run('FIX20', [DEFS.F20, DEFS.A02], 'best-saving');
+    expect(r).toMatchObject({
+      selected: { id: DEFS.A02.id }, discountMinor: 3000, coupon: { code: 'FIX20', status: 'superseded' }, error: null,
+    });
+    expect(Object.values(r.allocations).reduce((n, v) => n + v, 0)).toBe(3000);
+  });
+
+  test('best-saving keeps the coupon when it saves more or ties (deterministic)', () => {
+    expect(run('TEN10', [DEFS.P10, DEFS.A01], 'best-saving')).toMatchObject({ selected: { id: DEFS.P10.id }, discountMinor: 3000 });
+    const tie = { ...DEFS.A01, id: id('14'), discount: { kind: 'fixed', amountMinor: 2000, currency: 'AUD' } };
+    expect(run('FIX20', [DEFS.F20, tie], 'best-saving')).toMatchObject({ selected: { id: DEFS.F20.id }, coupon: { status: 'applied' } });
+  });
+
+  test('best-saving still reports invalid coupons explicitly', () => {
+    const r = run('NOPE', [DEFS.A02], 'best-saving');
+    expect(r.error.code).toBe('COUPON_NOT_FOUND');
+    expect(r.discountMinor).toBe(0);
+  });
+
+  test('legacy below-minimum acceptance suppresses automatics only under v1', () => {
+    expect(run('TRAILREADY', [legacy, DEFS.A01])).toMatchObject({ selected: { id: legacy.id }, discountMinor: 0, coupon: { status: 'accepted-below-minimum' } });
+    expect(run('TRAILREADY', [legacy, DEFS.A01], 'best-saving')).toMatchObject({
+      selected: { id: DEFS.A01.id }, discountMinor: 1000, coupon: { code: 'TRAILREADY', status: 'superseded' },
+    });
+  });
+
+  test('without a coupon both modes pick the best automatic', () => {
+    expect(run(null, [DEFS.A01, DEFS.A02, DEFS.A03], 'best-saving').selected.id).toBe(DEFS.A02.id);
+    expect(run(null, [DEFS.A01, DEFS.A02, DEFS.A03]).selected.id).toBe(DEFS.A02.id);
+  });
+});

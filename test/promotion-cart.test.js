@@ -834,18 +834,83 @@ describe('mergeCarts: claim → apply once → retire (exactly-once, explicit er
     expect(await status(src)).toBe('merged');
   });
 
-  test('a failed destination write releases the source intact; retry merges once', async () => {
+  test('a failed destination write keeps the claim (never reactivated); the repeat merges once', async () => {
     const { dest, src } = await setup();
     const coll = carts();
     const original = coll.replaceOne.bind(coll);
-    coll.replaceOne = async (filter) => { coll.replaceOne = original; if (filter.id === dest) throw new Error('db unavailable'); return original(filter); };
+    coll.replaceOne = async (filter, doc, o) => { coll.replaceOne = original; if (filter.id === dest) throw new Error('db unavailable'); return original(filter, doc, o); };
     const first = await merge(src, dest);
     expect(first.errors).toBeDefined();
-    expect(await status(src)).toBe('active');
-    expect(await qty(src, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merging');
     expect(await qty(dest, cheap.sku)).toBe(0);
+    expect((await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false })).errors[0].message).toMatch(/isn't active/);
     expect((await merge(src, dest)).errors).toBeUndefined();
     expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await qty(dest, extra.sku)).toBe(0);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('a destination write that committed but then threw (uncertain outcome): the repeat adds nothing', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    coll.replaceOne = async (filter, doc, o) => {
+      if (filter.id !== dest) return original(filter, doc, o);
+      coll.replaceOne = original;
+      await original(filter, doc, o);
+      throw new Error('timeout after commit');
+    };
+    expect((await merge(src, dest)).errors).toBeDefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merging');
+    expect((await merge(src, dest)).errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    expect(await status(src)).toBe('merged');
+  });
+
+  test('A fails its destination write while B (paused before its write) resumes; a source edit then is refused, nothing lost', async () => {
+    const { dest, src } = await setup();
+    const coll = carts();
+    const original = coll.replaceOne.bind(coll);
+    let destWrites = 0;
+    let bPromise;
+    let releaseB;
+    let bAtWrite;
+    const bReady = new Promise((r) => { bAtWrite = r; });
+    coll.replaceOne = async (filter, doc, o) => {
+      if (filter.id !== dest) return original(filter, doc, o);
+      destWrites += 1;
+      if (destWrites === 1) {
+        // A's write: let B load the (same) claim and destination and stop just before its write.
+        bPromise = merge(src, dest);
+        await bReady;
+        throw new Error('db unavailable');
+      }
+      if (destWrites === 2) {
+        bAtWrite();
+        await new Promise((r) => { releaseB = r; });
+      }
+      return original(filter, doc, o);
+    };
+    const a = await merge(src, dest);
+    expect(a.errors).toBeDefined();
+    const statusAfterA = await status(src);
+    const edit = await gql(ADD, { id: src, sku: extra.sku, qty: 1 }, { auth: false });
+    releaseB();
+    const b = await bPromise;
+    coll.replaceOne = original;
+    const repeat = await merge(src, dest);
+    const srcDoc = await carts().findOne({ id: src });
+    const editAccepted = !edit.errors;
+    // never reactivated, so the edit is refused; and nothing accepted is ever lost or duplicated
+    expect(statusAfterA).toBe('merging');
+    expect(editAccepted).toBe(false);
+    expect(b.errors).toBeUndefined();
+    expect(repeat.errors).toBeUndefined();
+    expect(await qty(dest, cheap.sku)).toBe(2);
+    const sourceExtra = srcDoc.items.find((i) => i.sku === extra.sku)?.quantity || 0;
+    expect(await qty(dest, extra.sku)).toBe(sourceExtra);
+    expect(srcDoc.status).toBe('merged');
   });
 
   test('a merge abandoned on a destination that was ordered is reclaimed by the new destination', async () => {

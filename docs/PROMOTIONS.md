@@ -88,9 +88,10 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
     2. Add that snapshot to the destination once. The merge is recorded in `mergedSources`.
     3. Retire the source to `merged`.
 
-    Every failure is an explicit error. If step 2 fails, the source is released. If step 3 fails,
-    the claim stays in place, and a repeated request finishes the merge without adding the items
-    again.
+    Every failure is an explicit error, and a claimed source is never reactivated. After a failed
+    or uncertain step 2 or 3 the claim stays in place, and a repeated request completes the merge
+    exactly once. A claim left on a destination that is no longer active is reclaimed by the
+    shopper's next cart.
 
 ## Configuration
 

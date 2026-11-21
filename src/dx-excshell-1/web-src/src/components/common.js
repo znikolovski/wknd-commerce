@@ -6,7 +6,7 @@ import { callAdmin } from '../api'
 import { useShell } from '../shell-context'
 
 /** Runs an admin op on mount/when deps change; returns { data, error, loading, reload }. */
-export function useAdminQuery (op, args = {}, deps = []) {
+export function useAdminQuery (op, args = {}, deps = [], { endpoint } = {}) {
   const { ims } = useShell()
   const [state, setState] = useState({ data: null, error: null, loading: true })
   const [nonce, setNonce] = useState(0)
@@ -22,7 +22,7 @@ export function useAdminQuery (op, args = {}, deps = []) {
     }
     const controller = new AbortController()
     setState((s) => ({ ...s, loading: true, error: null }))
-    callAdmin(ims, op, argsRef.current, { signal: controller.signal })
+    callAdmin(ims, op, argsRef.current, { signal: controller.signal, endpoint })
       .then((data) => setState({ data, error: null, loading: false }))
       .catch((error) => {
         if (error.name !== 'AbortError') setState((s) => ({ ...s, error, loading: false }))
@@ -38,7 +38,7 @@ export function useAdminQuery (op, args = {}, deps = []) {
 }
 
 /** Returns a mutate(op, args, successMessage) helper with pending state and toasts. */
-export function useAdminMutation () {
+export function useAdminMutation ({ endpoint } = {}) {
   const { ims } = useShell()
   const [pending, setPending] = useState(false)
   const mounted = useRef(true)
@@ -46,7 +46,7 @@ export function useAdminMutation () {
   const mutate = useCallback(async (op, args, successMessage) => {
     setPending(true)
     try {
-      const result = await callAdmin(ims, op, args)
+      const result = await callAdmin(ims, op, args, { endpoint })
       if (successMessage) ToastQueue.positive(successMessage, { timeout: 4000 })
       return result
     } catch (e) {

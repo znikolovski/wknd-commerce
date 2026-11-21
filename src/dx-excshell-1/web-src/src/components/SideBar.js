@@ -7,6 +7,7 @@ const LINKS = [
   ['/products', 'Products'],
   ['/inventory', 'Inventory'],
   ['/pricing', 'Pricing'],
+  ['/promotions', 'Promotions'],
   ['/orders', 'Orders']
 ]
 

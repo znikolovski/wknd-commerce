@@ -121,6 +121,22 @@ Consent is per purpose and never bundled or inferred (Spam Act 2003 express cons
 - A Brevo unsubscribe (webhook or blocked-contact sync) withdraws **every** purpose; hard bounces,
   complaints and blocks suppress the address for all sends.
 
+### Admin Promotions screen (human operators)
+
+The ExC Shell admin has a **Promotions** screen backed by the IMS-protected
+`commerce-admin/promotions` action (`lib/promotions-admin.js`). Each call runs as the signed-in
+individual IMS user (`ims-operator`, subject = IMS `user_id`, org must equal `ADMIN_IMS_ORG`;
+technical accounts are refused), so the shared service audits who changed what.
+
+- Promotions: list, create (draft/disabled by default), edit with `expectedRevision`, enable/disable.
+  Protected recovery terms are locked (only name/status); the service enforces it.
+- Reminder emails: aggregate status, recent runs (metadata only), request a run, pause/resume and
+  **approve** a run. Approval must come from a different individual than the requester — this is the
+  human-verified approval path for runs requested by CX Coworker (an integration actor cannot
+  approve). Execution (sending) is deliberately not exposed here.
+- Params: `PROMOTION_CURSOR_KEY`, `PROMOTION_SELECTION`, `RECOVERY_REDEMPTION_VERIFIED`,
+  `BREVO_RECOVERY_TEMPLATE_ID`, `RECOVERY_EMAIL_ALLOWLIST` (empty = nobody), `RECOVERY_EMAIL_DAILY_BUDGET`.
+
 Operator tools (CX Coworker via the Commerce MCP) call `createRecoveryEmail({ store, params, brevo })`
 with `brevo = createBrevoClient({ apiKey: params.BREVO_API_KEY })`: status, pause, resume,
 requestRun, approveRun, executeRun. Brevo's own MCP in CX Coworker is for template/campaign drafts

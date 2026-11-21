@@ -647,6 +647,53 @@ describe('reviewed-version recovery offer apply/remove (no-downgrade, changed-ca
     expect(JSON.stringify(after.shippingAddress || after.items.length)).not.toBe(JSON.stringify(before.shippingAddress || before.items.length));
   });
 
+  test('stale item/address save after a guarded coupon CAS: coupon kept, versions strictly increase (no ABA)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const seen = [await version(id)];
+    const num = (v) => Number(v.slice(1));
+    const applied = (await gql(APPLY_OFFER, { id, v: seen[0] })).data.applyWkndRecoveryOffer.cart.wknd_cart_version;
+    seen.push(applied);
+    interleave(id, ['RECOVER10']);
+    const shipped = (await gql(SHIP, { id })).data.setShippingAddressesOnCart.cart;
+    seen.push(shipped.wknd_cart_version);
+    expect(shipped.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    const removed = (await gql(REMOVE_OFFER, { id, v: shipped.wknd_cart_version })).data.removeWkndRecoveryOffer;
+    seen.push(removed.cart.wknd_cart_version);
+    interleave(id, ['WKND10']);
+    const added = (await gql(ADD, { id, sku: cheap.sku, qty: 1 })).data.addProductsToCart.cart;
+    expect(added.applied_coupons).toEqual([{ code: 'WKND10' }]);
+    seen.push(await version(id));
+    seen.map(num).reduce((prev, n) => { expect(n).toBeGreaterThan(prev); return n; }, -1);
+    expect(new Set(seen).size).toBe(seen.length);
+    // an old reviewed version can never become valid again
+    expect((await gql(APPLY_OFFER, { id, v: applied })).errors[0].extensions.code).toBe('CART_CHANGED');
+  });
+
+  test('normal checkout validation errors are unchanged by the retrying writers', async () => {
+    const id = await idleCart();
+    const r = await gql('mutation($id: String!) { setShippingMethodsOnCart(input: { cart_id: $id, shipping_methods: [{ carrier_code: "x", method_code: "y" }] }) { cart { id } } }', { id });
+    expect(r.errors[0].message).toBe('The shipping address is missing. Set the address and try again.');
+    const p = await gql('mutation($id: String!) { setPaymentMethodOnCart(input: { cart_id: $id, payment_method: { code: "nope" } }) { cart { id } } }', { id });
+    expect(p.errors[0].message).toBe('The requested Payment Method is not available.');
+  });
+
+  test('a writer that keeps losing the race surfaces CART_CHANGED and writes nothing stale', async () => {
+    const id = await idleCart('TRAILREADY');
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons: ['WKND10'], revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+    const r = await gql(SHIP, { id });
+    carts.replaceOne = original;
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    const after = await carts.findOne({ id });
+    expect(after.coupons).toEqual(['WKND10']);
+    expect(after.shippingAddress ?? null).toBeNull();
+  });
+
   test('delegated agents: protected removal only via the reviewed-version mutation', async () => {
     const id = await idleCart('TRAILREADY');
     await gql(APPLY_OFFER, { id, v: await version(id) });

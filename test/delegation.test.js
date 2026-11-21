@@ -114,6 +114,38 @@ describe('delegated shopper assertions', () => {
   });
 });
 
+describe('environment isolation of delegated assertions (synthetic keys only)', () => {
+  // Independent synthetic keys stand in for distinct Stage and Production delegation secrets;
+  // the same Auth0 tenant, MCP issuer and audience are shared, as they are live.
+  const STAGE = { ...PARAMS, MCP_DELEGATION_SECRET: crypto.randomBytes(48).toString('base64url') };
+  const PROD = { ...PARAMS, MCP_DELEGATION_SECRET: crypto.randomBytes(48).toString('base64url') };
+  const signed = (params) => assertion({}, { secret: params.MCP_DELEGATION_SECRET });
+  const query = async (token, params) => gql(CART_QUERY, { token: await token, delegated: true, params });
+
+  test('each environment accepts only assertions signed with its own key', async () => {
+    expect((await query(signed(STAGE), STAGE)).errors).toBeUndefined();
+    expect((await query(signed(PROD), PROD)).errors).toBeUndefined();
+  });
+
+  test.each([
+    ['a Production-signed assertion presented to Stage', PROD, STAGE],
+    ['a Stage-signed assertion presented to Production', STAGE, PROD],
+  ])('%s is refused with no customer or cart created', async (_, signer, target) => {
+    const body = await query(signed(signer), target);
+    expect(body.data?.customerCart ?? null).toBeNull();
+    expect(body.errors[0].extensions.category).toBe('graphql-authentication');
+    expect(await store.collection('customers').countDocuments({})).toBe(0);
+    expect(await store.collection('carts').countDocuments({})).toBe(0);
+    expect(await store.collection('delegation_jti').countDocuments({})).toBe(0);
+  });
+
+  test('a secret shorter than 32 bytes disables delegation instead of weakening it', async () => {
+    const weak = { ...STAGE, MCP_DELEGATION_SECRET: 'too-short-secret' };
+    const body = await query(assertion({}, { secret: weak.MCP_DELEGATION_SECRET }), weak);
+    expect(body.errors[0].extensions.category).toBe('graphql-authorization');
+  });
+});
+
 describe('order placement claims the cart once', () => {
   async function readyCart() {
     const customer = { sub: SUB, email: 'shopper@example.com', addresses: [] };

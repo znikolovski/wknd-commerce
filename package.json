@@ -45,7 +45,8 @@
     "dropins:extract": "node scripts/extract-dropin-operations.mjs",
     "catalog:generate": "node scripts/generate-catalog.mjs",
     "catalog:seed": "node scripts/seed.mjs",
-    "mesh:build": "node scripts/build-mesh.mjs"
+    "mesh:build": "node scripts/build-mesh.mjs",
+    "deploy:check": "node scripts/check-deploy-env.mjs"
   },
   "engines": {
     "node": ">=18"

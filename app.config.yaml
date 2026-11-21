@@ -2,6 +2,9 @@
 # PDP prerendering, Content AI search proxy and the admin UI (dx/excshell/1).
 # Values come from .env (see .env.example) and are injected as default action inputs.
 application:
+  hooks:
+    # Fail closed: refuse to deploy when a promotion gate or identity input is missing in .env.
+    pre-app-deploy: node scripts/check-deploy-env.mjs
   runtimeManifest:
     database:
       auto-provision: true

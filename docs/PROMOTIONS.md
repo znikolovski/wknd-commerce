@@ -103,6 +103,40 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 | `AUTH0_ISSUER` | storefront | existing; binds shopper identity for recovery |
 | `PROMOTIONS_DB_CLIENT_ID`, `PROMOTIONS_DB_CLIENT_SECRET`, `PROMOTIONS_DB_ORG_ID`, `DB_REGION` | migration script (local `.env`) | workspace OAuth S2S credential |
 
+## Deploy input check
+
+`aio app deploy` takes `$WKND_*` action inputs from the deploying checkout's `.env`. If a gate is
+missing there, it would silently deploy in its default state. The `pre-app-deploy` hook
+(`npm run deploy:check`, `scripts/check-deploy-env.mjs`) therefore refuses to deploy unless:
+
+- `WKND_RECOVERY_REDEMPTION_VERIFIED` is explicitly set to `true` or `false`;
+- `WKND_PROMOTION_SELECTION` is explicitly set to `best-saving` or `explicit-first`;
+- `WKND_AUTH0_ISSUER` and `WKND_AUTH0_AUDIENCE` are set.
+
+It prints only the namespace, variable names and the allowed gate values, never secrets.
+Variables the manifest references but `.env` doesn't declare are listed as warnings. To deploy a
+gate off, set it to its off value explicitly. Use `--env=<path>` to check another checkout.
+
+## Delegation secret per environment
+
+Stage and Production must use **different** `WKND_MCP_DELEGATION_SECRET` values. They share the
+Auth0 tenant, MCP issuer and audience, so with one shared secret a Stage-signed assertion would
+also be accepted by Production. `test/delegation.test.js` proves cross-environment rejection with
+independent synthetic keys.
+
+Rotation is prepared, then activated in one coordinated step:
+
+1. **Prepare.** Put the new Stage value in `WKND_MCP_DELEGATION_SECRET_NEXT` in the Stage deploy
+   `.env`. No manifest maps it, so no deploy picks it up. Hand it to the LLM signer through a
+   mode-600 local file, never chat, logs or Git.
+2. **Activate (separately approved).**
+   - Move NEXT into `WKND_MCP_DELEGATION_SECRET` (Stage only) and deploy Stage actions.
+   - At the same time, set the LLM Apps **Stage** server-side secret
+     `WKND_COMMERCE_ASSERTION_SECRET` to the same value, set `WKND_COMMERCE_GRAPHQL_URL` to the Stage
+     `storefront-graphql` URL, and redeploy LLM Stage.
+3. **Verify.** A Production-signed assertion is refused by Stage. Production is never called with
+   a Stage assertion.
+
 ## Activation order
 
 1. `node scripts/migrate-promotions.mjs --verify-storage` (prove unique `_id` + conditional update).

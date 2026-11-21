@@ -619,4 +619,53 @@ describe('reviewed-version recovery offer apply/remove (no-downgrade, changed-ca
     const r = await gql(APPLY_OFFER, { id: 'x', v: 'v0' }, { auth: false });
     expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
   });
+
+  test('reviewed version is invalidated by any cart change (item edit after review)', async () => {
+    const id = await idleCart('TRAILREADY');
+    const reviewed = await version(id);
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    await age(id, 30);
+    const r = await gql(APPLY_OFFER, { id, v: reviewed });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(await coupons(id)).toEqual(['TRAILREADY']);
+  });
+
+  const SHIP = 'mutation($id: String!) { setShippingAddressesOnCart(input: { cart_id: $id, shipping_addresses: [{ address: { firstname: "Sam", lastname: "S", street: ["1 Trail St"], city: "Sydney", postcode: "2000", telephone: "0400000000", country_code: "AU", region: "NSW" } }] }) { cart { wknd_cart_version applied_coupons { code } } } }';
+
+  test.each([
+    ['setShippingAddressesOnCart', (id) => gql(SHIP, { id })],
+    ['addProductsToCart', (id) => gql(ADD, { id, sku: cheap.sku, qty: 1 })],
+  ])('%s racing a guarded coupon write keeps that coupon and still applies its own change', async (_, write) => {
+    const id = await idleCart('TRAILREADY');
+    const before = await store.collection('carts').findOne({ id });
+    interleave(id, ['RECOVER10']);
+    const r = await write(id);
+    expect(r.errors).toBeUndefined();
+    const after = await store.collection('carts').findOne({ id });
+    expect(after.coupons).toEqual(['RECOVER10']);
+    expect(after.revision).toBeGreaterThanOrEqual((before.revision || 0) + 2);
+    expect(JSON.stringify(after.shippingAddress || after.items.length)).not.toBe(JSON.stringify(before.shippingAddress || before.items.length));
+  });
+
+  test('delegated agents: protected removal only via the reviewed-version mutation', async () => {
+    const id = await idleCart('TRAILREADY');
+    await gql(APPLY_OFFER, { id, v: await version(id) });
+    const REMOVE_ONE = 'mutation($id: String!) { removeCouponFromCart(input: { cart_id: $id }) { cart { applied_coupons { code } } } }';
+    const REMOVE_SOME = 'mutation($id: String!, $codes: [String!]!) { removeCouponsFromCart(input: { cart_id: $id, coupon_codes: $codes }) { cart { applied_coupons { code } } } }';
+    expect((await delegated(REMOVE_ONE, { id })).errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect((await delegated(REMOVE_SOME, { id, codes: ['RECOVER10'] })).errors[0].extensions.code).toBe('REVIEWED_VERSION_REQUIRED');
+    expect(await coupons(id)).toEqual(['RECOVER10']);
+    const r = (await delegated(REMOVE_OFFER, { id, v: await version(id) })).data.removeWkndRecoveryOffer;
+    expect(r.outcome).toBe('REMOVED');
+    await gql(APPLY, { id, code: 'WKND10' });
+    expect((await delegated(REMOVE_SOME, { id, codes: ['WKND10'] })).data.removeCouponsFromCart.cart.applied_coupons).toEqual([]);
+  });
+
+  test('website ordinary coupon removal is unchanged (clear-all still works)', async () => {
+    const id = await idleCart('TRAILREADY');
+    await gql(APPLY_OFFER, { id, v: await version(id) });
+    const r = await gql('mutation($id: String!) { removeCouponFromCart(input: { cart_id: $id }) { cart { applied_coupons { code } } } }', { id });
+    expect(r.data.removeCouponFromCart.cart.applied_coupons).toEqual([]);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
+  });
 });

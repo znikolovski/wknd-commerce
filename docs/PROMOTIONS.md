@@ -72,9 +72,16 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
     If another coupon is applied it returns `NOT_APPLIED` and writes nothing.
   - Outcomes: `APPLIED`, `ALREADY_APPLIED`, `REMOVED`, `NOT_APPLIED`. Each returns the cart with
     its new version.
-  - A delegated (LLM) caller applying a protected code through `applyCouponToCart` or
-    `applyCouponsToCart` is refused with `REVIEWED_VERSION_REQUIRED`. Ordinary coupons are
-    unaffected.
+  - A delegated (LLM) caller that tries to apply or remove a protected code through the generic
+    coupon mutations is refused with `REVIEWED_VERSION_REQUIRED`. Removing a discount can raise
+    what the shopper pays, so both directions need the reviewed version. Ordinary coupons and
+    website callers are unaffected.
+  - Every cart write uses the revision compare-and-set:
+    - Coupon writes surface `CART_CHANGED`.
+    - Item, address, shipping, payment, merge and reorder writes re-apply their own change to a
+      fresh read (up to 3 attempts). They never set coupons, so they cannot overwrite a guarded
+      coupon change.
+    - Each write bumps `wknd_cart_version`.
 
 ## Configuration
 

@@ -49,6 +49,9 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 - Recovery offer GraphQL: `wkndRecoveryOffer(cart_id)` (read-only status) and
   `claimWkndRecoveryOffer(cart_id)` (issues the entitlement). The shopper then applies the
   returned code. Guests are not eligible.
+- When available, the offer also returns `saving` (what the offer would take off the cart now) and
+  `current_saving` (what the currently applied promotion takes off), both from the shared engine.
+  They are display-only estimates; storefronts show the offer only when `saving > current_saving`.
 
 ## Configuration
 

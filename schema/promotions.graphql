@@ -30,6 +30,10 @@ type WkndRecoveryOffer {
   percent_off: Float
   max_discount: Money
   expires_at: String
+  "What this offer would take off the cart now, computed by the promotion engine (display only)."
+  saving: Money
+  "What the cart's currently applied promotion takes off, for comparison with saving."
+  current_saving: Money
 }
 
 extend type Customer {

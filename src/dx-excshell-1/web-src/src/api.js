@@ -5,6 +5,11 @@
 import config from './config.json'
 
 const ADMIN_URL = config['commerce-admin/admin'] || config.admin
+const ENDPOINTS = {
+  admin: ADMIN_URL,
+  // shared promotion engine + recovery-email approvals, called as the signed-in IMS user
+  promotions: config['commerce-admin/promotions'] || config.promotions
+}
 
 export class AdminApiError extends Error {
   constructor (message, status) {
@@ -13,9 +18,9 @@ export class AdminApiError extends Error {
   }
 }
 
-export async function callAdmin (ims, op, args = {}, { signal } = {}) {
+export async function callAdmin (ims, op, args = {}, { signal, endpoint = 'admin' } = {}) {
   if (!ims?.token) throw new AdminApiError('You are not signed in to Adobe Experience Cloud.', 401)
-  const res = await fetch(ADMIN_URL, {
+  const res = await fetch(ENDPOINTS[endpoint], {
     method: 'POST',
     signal,
     headers: {

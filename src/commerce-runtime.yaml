@@ -21,6 +21,25 @@ packages:
         limits:
           timeout: 120000
           memorySize: 512
+      promotions:
+        function: ../actions/promotions-admin/index.js
+        web: 'yes'
+        runtime: nodejs:22
+        inputs:
+          AUTH0_ISSUER: $WKND_AUTH0_ISSUER
+          PROMOTION_CURSOR_KEY: $WKND_PROMOTION_CURSOR_KEY
+          PROMOTION_SELECTION: $WKND_PROMOTION_SELECTION
+          RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
+          BREVO_RECOVERY_TEMPLATE_ID: $WKND_BREVO_RECOVERY_TEMPLATE_ID
+          RECOVERY_EMAIL_ALLOWLIST: $WKND_RECOVERY_EMAIL_ALLOWLIST
+          RECOVERY_EMAIL_DAILY_BUDGET: $WKND_RECOVERY_EMAIL_DAILY_BUDGET
+        annotations:
+          require-adobe-auth: true
+          include-ims-credentials: true
+          final: true
+        limits:
+          timeout: 60000
+          memorySize: 512
   commerce-assets:
     license: Apache-2.0
     inputs:

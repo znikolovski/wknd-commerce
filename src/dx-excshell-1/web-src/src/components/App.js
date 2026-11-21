@@ -11,6 +11,7 @@ import Inventory from './Inventory'
 import Pricing from './Pricing'
 import Orders from './Orders'
 import OrderDetail from './OrderDetail'
+import Promotions from './Promotions'
 import { Empty } from './common'
 
 function App (props) {
@@ -47,6 +48,7 @@ function App (props) {
                   <Route path='/products/:sku' element={<KeyedProductEditor />} />
                   <Route path='/inventory' element={<Inventory />} />
                   <Route path='/pricing' element={<Pricing />} />
+                  <Route path='/promotions' element={<Promotions />} />
                   <Route path='/orders' element={<Orders />} />
                   <Route path='/orders/:number' element={<OrderDetail />} />
                   <Route path='*' element={<Empty title='Page not found'>Use the navigation to choose a section.</Empty>} />

@@ -81,6 +81,10 @@ application:
             inputs:
               RECOVERY_REDEMPTION_VERIFIED: $WKND_RECOVERY_REDEMPTION_VERIFIED
               PROMOTION_SELECTION: $WKND_PROMOTION_SELECTION
+              BREVO_API_KEY: $WKND_BREVO_API_KEY
+              BREVO_RECOVERY_TEMPLATE_ID: $WKND_BREVO_RECOVERY_TEMPLATE_ID
+              RECOVERY_EMAIL_ALLOWLIST: $WKND_RECOVERY_EMAIL_ALLOWLIST
+              RECOVERY_EMAIL_DAILY_BUDGET: $WKND_RECOVERY_EMAIL_DAILY_BUDGET
             annotations:
               include-ims-credentials: true
             limits:

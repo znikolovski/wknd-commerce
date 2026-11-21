@@ -93,17 +93,26 @@ default off, never inferred from sign-in or checkout). Safety defaults:
   `MAX_DISCOUNT`. The Brevo template must state that the store and payment are a demo and include
   Brevo's unsubscribe link.
 
-Actions (manifest entries to add):
+Actions:
 
 | Action | Type | Params |
 | --- | --- | --- |
-| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED` |
+| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED`, `BREVO_API_KEY`, `BREVO_RECOVERY_TEMPLATE_ID`, `RECOVERY_EMAIL_ALLOWLIST`, `RECOVERY_EMAIL_DAILY_BUDGET` |
 | `brevo-webhook` | raw web action, no IMS (optional) | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
 
 Suppression does not depend on the webhook: before every run `executeRun` pulls Brevo's
 transactional blocked/unsubscribed contacts (`GET /v3/smtp/blockedContacts`) into
 `email_suppressions` and turns off the opt-in for unsubscribes. If that call fails the run sends
 nothing (`SUPPRESSION_SYNC_FAILED`) and stays approved. The webhook only shortens the delay.
+
+Sending is done by `promotions-worker` via `executeNextApprovedRun`:
+
+- Each tick (~5 min) it executes at most the **oldest approved** run, using every guard above.
+- Without `BREVO_API_KEY` it does nothing (`not-configured`).
+- While paused it returns `skipped/PAUSED` and the run stays approved until it expires.
+- The worker never receives `RECOVERY_EMAIL_ALLOWLIST_DISABLED`, so deployed sends are always
+  limited to the allowlist. With an empty allowlist a run completes with zero sends.
+- Set `WKND_BREVO_API_KEY` in the deploy `.env` (git-ignored); never commit or paste it.
 
 ### Marketing consent purposes
 

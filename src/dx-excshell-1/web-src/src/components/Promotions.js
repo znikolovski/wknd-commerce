@@ -1,13 +1,16 @@
-import React, { useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertDialog, Badge, Button, ButtonGroup, Cell, Checkbox, CheckboxGroup, Column, Content, DatePicker, Dialog, DialogContainer,
   Divider, Flex, Form, Heading, InlineAlert, NumberField, Radio, RadioGroup, Row, StatusLight, Switch, TableBody, TableHeader,
   TableView, Text, TextArea, TextField, ToastQueue, View
 } from '@adobe/react-spectrum'
-import { formatDate, formatMoney } from '../api'
+import { callAdmin, formatDate, formatMoney } from '../api'
+import { useShell } from '../shell-context'
 import { ErrorAlert, PageHeader, useAdminMutation, useAdminQuery } from './common'
 
 const PROMOTIONS = { endpoint: 'promotions' }
+const PAGE_SIZE = 50 // service maximum (wknd.promotions/v1 listMax)
+const MAX_PAGES = 20
 const newKey = () => (window.crypto?.randomUUID ? window.crypto.randomUUID() : null)
 
 /** Service envelopes report failures as { ok: false, error }; surface them as one message. */
@@ -30,8 +33,39 @@ const minorOrNull = (v) => (Number.isFinite(v) && v > 0 ? Math.round(v * 100) : 
 const dateOf = (iso) => (iso ? iso.slice(0, 10) : null)
 const toIso = (date, endOfDay) => (date ? new Date(`${date.toString()}T${endOfDay ? '23:59:59' : '00:00:00'}Z`).toISOString() : null)
 
+/** Loads every promotion by following nextCursor (pages of PAGE_SIZE). */
+function usePromotionList () {
+  const { ims } = useShell()
+  const [state, setState] = useState({ data: null, error: null, loading: true })
+  const [nonce, setNonce] = useState(0)
+  useEffect(() => {
+    const controller = new AbortController()
+    setState((s) => ({ ...s, loading: true, error: null }))
+    const load = async () => {
+      const items = []
+      let cursor
+      for (let page = 0; page < MAX_PAGES; page += 1) {
+        const args = cursor ? { limit: PAGE_SIZE, cursor } : { limit: PAGE_SIZE }
+        // eslint-disable-next-line no-await-in-loop
+        const result = await callAdmin(ims, 'promotions.list', args, { signal: controller.signal, endpoint: 'promotions' })
+        if (result?.ok === false) return result
+        items.push(...(result.items || []))
+        cursor = result.nextCursor
+        if (!cursor) break
+      }
+      return { ok: true, items }
+    }
+    load()
+      .then((data) => setState({ data, error: null, loading: false }))
+      .catch((error) => { if (error.name !== 'AbortError') setState((s) => ({ ...s, error, loading: false })) })
+    return () => controller.abort()
+  }, [ims.token, nonce])
+  const reload = useCallback(() => setNonce((n) => n + 1), [])
+  return { ...state, reload }
+}
+
 export default function Promotions () {
-  const list = useAdminQuery('promotions.list', { limit: 100 }, [], PROMOTIONS)
+  const list = usePromotionList()
   const categories = useAdminQuery('categories.list')
   const { mutate, pending } = useAdminMutation(PROMOTIONS)
   const [editing, setEditing] = useState(null)

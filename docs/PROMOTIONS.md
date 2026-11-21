@@ -105,6 +105,22 @@ transactional blocked/unsubscribed contacts (`GET /v3/smtp/blockedContacts`) int
 `email_suppressions` and turns off the opt-in for unsubscribes. If that call fails the run sends
 nothing (`SUPPRESSION_SYNC_FAILED`) and stays approved. The webhook only shortens the delay.
 
+### Marketing consent purposes
+
+Consent is per purpose and never bundled or inferred (Spam Act 2003 express consent; APP 5/7):
+
+| Purpose | Profile field | GraphQL |
+| --- | --- | --- |
+| `recovery` — cart reminders | `marketing.recoveryEmail` | `wknd_recovery_email_opt_in`, `setWkndRecoveryEmailOptIn` |
+| `audience` — WKND news & offers | `marketing.audienceEmail` | `wknd_marketing_email_opt_in`, `setWkndMarketingEmailOptIn` |
+
+- Mutations take `wording_version` (required to opt into `audience`) and `source` (`WEB`/`IOS`).
+- Every change appends to `marketing_consent_events` (`purpose`, `optIn`, `source`,
+  `wordingVersion`, `at`, hashed `subject` + `subjectKind`) as consent evidence.
+- Delegated agents (the ChatGPT/LLM app) cannot change consent (`DIRECT_SIGN_IN_REQUIRED`).
+- A Brevo unsubscribe (webhook or blocked-contact sync) withdraws **every** purpose; hard bounces,
+  complaints and blocks suppress the address for all sends.
+
 Operator tools (CX Coworker via the Commerce MCP) call `createRecoveryEmail({ store, params, brevo })`
 with `brevo = createBrevoClient({ apiKey: params.BREVO_API_KEY })`: status, pause, resume,
 requestRun, approveRun, executeRun. Brevo's own MCP in CX Coworker is for template/campaign drafts

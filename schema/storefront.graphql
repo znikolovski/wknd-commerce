@@ -1829,8 +1829,16 @@ type Mutation {
   """
   claimWkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
 
-  """Signed-in customer sets the cart-reminder email preference."""
-  setWkndRecoveryEmailOptIn(opt_in: Boolean!): Boolean!
+  """
+  Signed-in customer sets the cart-reminder email preference (not available to delegated agents).
+  """
+  setWkndRecoveryEmailOptIn(opt_in: Boolean!, wording_version: String, source: WkndConsentSource = WEB): Boolean!
+
+  """
+  Signed-in customer sets the WKND news & offers email preference. Opting in requires the
+  wording_version of the consent text the shopper saw. Not available to delegated agents.
+  """
+  setWkndMarketingEmailOptIn(opt_in: Boolean!, wording_version: String, source: WkndConsentSource = WEB): Boolean!
 }
 
 """Defines the comparison operators that can be used in a filter."""
@@ -8570,6 +8578,11 @@ type Customer {
   Explicit opt-in to one cart-reminder email per inactive cart (never inferred from sign-in or checkout).
   """
   wknd_recovery_email_opt_in: Boolean!
+
+  """
+  Separate explicit opt-in to WKND news & offers emails (never implied by cart-reminder consent).
+  """
+  wknd_marketing_email_opt_in: Boolean!
 }
 
 """"""
@@ -22883,6 +22896,12 @@ type WkndRecoveryOffer {
   What the cart's currently applied promotion takes off, for comparison with saving.
   """
   current_saving: Money
+}
+
+"""Where the shopper gave or withdrew consent."""
+enum WkndConsentSource {
+  WEB
+  IOS
 }
 
 type Of1Discovery {

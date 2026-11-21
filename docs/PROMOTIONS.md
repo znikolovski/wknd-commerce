@@ -52,6 +52,15 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 - When available, the offer also returns `saving` (what the offer would take off the cart now) and
   `current_saving` (what the currently applied promotion takes off), both from the shared engine.
   They are display-only estimates; storefronts show the offer only when `saving > current_saving`.
+- Coupon writes (`applyCouponToCart`, `applyCouponsToCart`, `removeCouponFromCart`,
+  `removeCouponsFromCart`) save only against the cart revision they read. If another channel
+  changed the cart in between, the write is refused with a GraphQL error whose
+  `extensions.code` is `CART_CHANGED`. Nothing is overwritten. The client re-reads the cart and
+  decides again; it must not retry blindly.
+- To withdraw only the protected recovery coupon, call
+  `removeCouponsFromCart(coupon_codes: [<that code>])`. If an ordinary coupon has replaced it, the
+  call is a no-op. Never use `removeCouponFromCart`, which clears every coupon. Removing the
+  coupon does not touch the shopper's entitlement or redemption records.
 
 ## Configuration
 

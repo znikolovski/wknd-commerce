@@ -10,6 +10,7 @@ const { importCatalog } = require('../lib/importer');
 const { runGraphQL } = require('../lib/graphql-server');
 const { resetCatalogCache, loadCatalog } = require('../lib/catalog');
 const { placeOrder } = require('../lib/orders');
+const { saveCart } = require('../lib/cart');
 const {
   migrateLegacyPromotions, createPromotionService, loadPromotionRuntime, LEGACY_SEEDS,
 } = require('../lib/promotions');
@@ -379,5 +380,80 @@ describe('protected cart recovery', () => {
     inventory.updateOne = original;
     expect(placed.data.placeOrder.orderV2).toBeNull();
     expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+  });
+});
+
+describe('coupon writes are revision-guarded (protected-offer removal / no-downgrade races)', () => {
+  const REMOVE = 'mutation Remove($id: String!, $code: String!) { removeCouponsFromCart(input: { cart_id: $id, coupon_codes: [$code] }) { cart { applied_coupons { code } } } }';
+
+  beforeEach(async () => {
+    await migrateLegacyPromotions(store);
+    await bootstrapRecoveryPromotion(store);
+    await enableRecovery();
+  });
+
+  async function protectedCart() {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 2 });
+    await age(id, 30);
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    expect((await gql(APPLY, { id, code: 'RECOVER10' })).data.applyCouponToCart.cart.applied_coupons).toEqual([{ code: 'RECOVER10' }]);
+    return id;
+  }
+
+  test('a stale write is refused with CART_CHANGED and never erases a concurrent coupon', async () => {
+    const id = await protectedCart();
+    const stale = await store.collection('carts').findOne({ id });
+    await gql(APPLY, { id, code: 'WKND10' });
+    await expect(saveCart(store, { ...stale, coupons: [] }, { expectRevision: true }))
+      .rejects.toMatchObject({ code: 'CART_CHANGED' });
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['WKND10']);
+  });
+
+  test('removing the protected code after another channel replaced it leaves the ordinary coupon', async () => {
+    const id = await protectedCart();
+    await gql(APPLY, { id, code: 'WKND10' });
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.errors).toBeUndefined();
+    expect(r.data.removeCouponsFromCart.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
+  });
+
+  /** Commits another channel's coupon between this mutation's read and its write. */
+  function interleave(id, coupons) {
+    const carts = store.collection('carts');
+    const original = carts.replaceOne.bind(carts);
+    carts.replaceOne = async (filter, doc, options) => {
+      carts.replaceOne = original;
+      const live = await carts.findOne({ id });
+      await carts.updateOne({ id }, { $set: { coupons, revision: (live.revision || 0) + 1 } });
+      return original(filter, doc, options);
+    };
+  }
+
+  test('removal racing an ordinary coupon applied in between: refused, ordinary coupon kept', async () => {
+    const id = await protectedCart();
+    interleave(id, ['WKND10']);
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['WKND10']);
+  });
+
+  test('protected apply racing an ordinary coupon applied in between: refused, no silent replace', async () => {
+    const id = await protectedCart();
+    await gql(REMOVE, { id, code: 'RECOVER10' });
+    interleave(id, ['TRAILREADY']);
+    const r = await gql(APPLY, { id, code: 'RECOVER10' });
+    expect(r.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect((await store.collection('carts').findOne({ id })).coupons).toEqual(['TRAILREADY']);
+  });
+
+  test('removing the protected coupon leaves the entitlement and redemption untouched', async () => {
+    const id = await protectedCart();
+    const before = await store.collection('recovery_entitlements').find({});
+    const r = await gql(REMOVE, { id, code: 'RECOVER10' });
+    expect(r.data.removeCouponsFromCart.cart.applied_coupons).toEqual([]);
+    expect(await store.collection('recovery_entitlements').find({})).toEqual(before);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
   });
 });

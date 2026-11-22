@@ -52,6 +52,46 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 - When available, the offer also returns `saving` (what the offer would take off the cart now) and
   `current_saving` (what the currently applied promotion takes off), both from the shared engine.
   They are display-only estimates; storefronts show the offer only when `saving > current_saving`.
+- Coupon writes (`applyCouponToCart`, `applyCouponsToCart`, `removeCouponFromCart`,
+  `removeCouponsFromCart`) save only against the cart revision they read. If another channel
+  changed the cart in between, the write is refused with a GraphQL error whose
+  `extensions.code` is `CART_CHANGED`. Nothing is overwritten. The client re-reads the cart and
+  decides again; it must not retry blindly.
+- To withdraw only the protected recovery coupon, call
+  `removeCouponsFromCart(coupon_codes: [<that code>])`. If an ordinary coupon has replaced it, the
+  call is a no-op. Never use `removeCouponFromCart`, which clears every coupon. Removing the
+  coupon does not touch the shopper's entitlement or redemption records.
+- Reviewed-version offer writes (required for delegated agents; available to every signed-in
+  shopper):
+  - `Cart.wknd_cart_version` is an opaque token that changes on every cart write.
+  - `applyWkndRecoveryOffer(cart_id, expected_cart_version)` applies the offer only to that exact
+    reviewed cart, and only if the engine says it saves strictly more than the current promotion.
+    Errors: `OFFER_NOT_BETTER`, `CART_CHANGED`, `RECOVERY_OFFER_UNAVAILABLE`. It claims an
+    ELIGIBLE entitlement first, which is idempotent and is not a redemption.
+  - `removeWkndRecoveryOffer(cart_id, expected_cart_version)` removes only the protected coupon.
+    If another coupon is applied it returns `NOT_APPLIED` and writes nothing.
+  - Outcomes: `APPLIED`, `ALREADY_APPLIED`, `REMOVED`, `NOT_APPLIED`. Each returns the cart with
+    its new version.
+  - A delegated (LLM) caller that tries to apply or remove a protected code through the generic
+    coupon mutations is refused with `REVIEWED_VERSION_REQUIRED`. Removing a discount can raise
+    what the shopper pays, so both directions need the reviewed version. Ordinary coupons and
+    website callers are unaffected.
+  - Every cart write uses the revision compare-and-set:
+    - Coupon writes surface `CART_CHANGED`.
+    - Item, address, shipping, payment, merge and reorder writes re-apply their own change to a
+      fresh read (up to 3 attempts). They never set coupons, so they cannot overwrite a guarded
+      coupon change.
+    - Each write bumps `wknd_cart_version`.
+  - `mergeCarts` runs exactly once, without multi-document transactions:
+    1. Claim the source with a revision compare-and-set. Its status becomes `merging`, which makes
+       it inactive and unchangeable.
+    2. Add that snapshot to the destination once. The merge is recorded in `mergedSources`.
+    3. Retire the source to `merged`.
+
+    Every failure is an explicit error, and a claimed source is never reactivated. After a failed
+    or uncertain step 2 or 3 the claim stays in place, and a repeated request completes the merge
+    exactly once. A claim left on a destination that is no longer active is reclaimed by the
+    shopper's next cart.
 
 ## Configuration
 
@@ -62,6 +102,40 @@ resolves stale requests by rolling a proven commit forward or fencing the slot.
 | `PROMOTION_SELECTION` | storefront + management | `best-saving` opts into the `wknd.promotions/v2` selection gate (highest actual saving of the eligible coupon and best automatic; ties keep the coupon; a beaten coupon stays stored as `superseded`). Anything else keeps v1 explicit-coupon precedence. Set the same value on every action that prices carts or orders. |
 | `AUTH0_ISSUER` | storefront | existing; binds shopper identity for recovery |
 | `PROMOTIONS_DB_CLIENT_ID`, `PROMOTIONS_DB_CLIENT_SECRET`, `PROMOTIONS_DB_ORG_ID`, `DB_REGION` | migration script (local `.env`) | workspace OAuth S2S credential |
+
+## Deploy input check
+
+`aio app deploy` takes `$WKND_*` action inputs from the deploying checkout's `.env`. If a gate is
+missing there, it would silently deploy in its default state. The `pre-app-deploy` hook
+(`npm run deploy:check`, `scripts/check-deploy-env.mjs`) therefore refuses to deploy unless:
+
+- `WKND_RECOVERY_REDEMPTION_VERIFIED` is explicitly set to `true` or `false`;
+- `WKND_PROMOTION_SELECTION` is explicitly set to `best-saving` or `explicit-first`;
+- `WKND_AUTH0_ISSUER` and `WKND_AUTH0_AUDIENCE` are set.
+
+It prints only the namespace, variable names and the allowed gate values, never secrets.
+Variables the manifest references but `.env` doesn't declare are listed as warnings. To deploy a
+gate off, set it to its off value explicitly. Use `--env=<path>` to check another checkout.
+
+## Delegation secret per environment
+
+Stage and Production must use **different** `WKND_MCP_DELEGATION_SECRET` values. They share the
+Auth0 tenant, MCP issuer and audience, so with one shared secret a Stage-signed assertion would
+also be accepted by Production. `test/delegation.test.js` proves cross-environment rejection with
+independent synthetic keys.
+
+Rotation is prepared, then activated in one coordinated step:
+
+1. **Prepare.** Put the new Stage value in `WKND_MCP_DELEGATION_SECRET_NEXT` in the Stage deploy
+   `.env`. No manifest maps it, so no deploy picks it up. Hand it to the LLM signer through a
+   mode-600 local file, never chat, logs or Git.
+2. **Activate (separately approved).**
+   - Move NEXT into `WKND_MCP_DELEGATION_SECRET` (Stage only) and deploy Stage actions.
+   - At the same time, set the LLM Apps **Stage** server-side secret
+     `WKND_COMMERCE_ASSERTION_SECRET` to the same value, set `WKND_COMMERCE_GRAPHQL_URL` to the Stage
+     `storefront-graphql` URL, and redeploy LLM Stage.
+3. **Verify.** A Production-signed assertion is refused by Stage. Production is never called with
+   a Stage assertion.
 
 ## Activation order
 

@@ -11,7 +11,9 @@ const { runGraphQL } = require('../lib/graphql-server');
 const { resetCatalogCache, loadCatalog } = require('../lib/catalog');
 const { migrateLegacyPromotions, createPromotionService } = require('../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../lib/recovery-policy');
-const { createRecoveryEmail, handleBrevoWebhook } = require('../lib/recovery-email');
+const {
+  createRecoveryEmail, handleBrevoWebhook, executeNextApprovedRun, allowlisted,
+} = require('../lib/recovery-email');
 const { BrevoError } = require('../lib/brevo');
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
@@ -232,6 +234,109 @@ describe('execution', () => {
     await svc.resume();
     await svc.executeRun({ runId: await approvedRun(svc) });
     expect(sent.map((m) => m.to.email)).toEqual(['ben@example.com']);
+  });
+});
+
+describe('allowlist: exact addresses and whole domains', () => {
+  const list = new Set(['@adobe.com', 'jaggah@gmail.com', 'znikolovski24@gmail.com']);
+
+  test.each([
+    ['someone@adobe.com', true],
+    ['Some.One@ADOBE.com ', true],
+    ['jaggah@gmail.com', true],
+    ['ZNikolovski24@gmail.com', true],
+    ['other@gmail.com', false],
+    ['x@sub.adobe.com', false],
+    ['x@adobe.com.evil.example', false],
+    ['x@notadobe.com', false],
+    ['adobe.com', false],
+    ['@adobe.com', false],
+    ['', false],
+  ])('%s → %s', (email, expected) => {
+    expect(allowlisted(list, email)).toBe(expected);
+  });
+
+  test('a run sends only to allowlisted domains and addresses', async () => {
+    await shopper('auth0|adobe', 'tester@adobe.com');
+    await shopper('auth0|gmail', 'stranger@gmail.com');
+    await enableOffer();
+    const params = { ...PARAMS, RECOVERY_EMAIL_ALLOWLIST: '@adobe.com,jaggah@gmail.com' };
+    const svc = createRecoveryEmail({
+      store, params, clock, brevo,
+    });
+    await svc.resume();
+    const { runId } = await svc.requestRun(operator('marketer'), { maxRecipients: 10 });
+    await svc.approveRun(operator('approver'), { runId, templateId: '12', maxRecipients: 10 });
+    expect(await svc.executeRun({ runId })).toMatchObject({ sent: 1 });
+    expect(sent.map((m) => m.to.email)).toEqual(['tester@adobe.com']);
+  });
+});
+
+describe('scheduled executor (promotions-worker)', () => {
+  const KEYED = { ...PARAMS, BREVO_API_KEY: 'test-key' };
+  const createClient = ({ apiKey }) => {
+    expect(apiKey).toBe('test-key');
+    return brevo;
+  };
+  const run = (params = KEYED) => executeNextApprovedRun({
+    store, params, clock, createClient,
+  });
+
+  beforeEach(async () => {
+    await shopper('auth0|ava', 'ava@example.com');
+    await shopper('auth0|ben', 'ben@example.com');
+    await shopper('auth0|cara', 'cara@example.com');
+  });
+
+  test('without an API key nothing is read or sent', async () => {
+    const svc = createRecoveryEmail({ store, params: PARAMS, clock });
+    await svc.resume();
+    await enableOffer();
+    await approvedRun(svc);
+    expect(await run(PARAMS)).toEqual({ state: 'not-configured' });
+    expect(sent).toHaveLength(0);
+  });
+
+  test('idle without an approved run; a requested-only run is never executed', async () => {
+    expect(await run()).toEqual({ state: 'idle' });
+    const svc = createRecoveryEmail({ store, params: PARAMS, clock });
+    await svc.requestRun(operator('marketer'), { maxRecipients: 5 });
+    expect(await run()).toEqual({ state: 'idle' });
+    expect(sent).toHaveLength(0);
+  });
+
+  test('paused (default): skipped, run stays approved, nothing sent', async () => {
+    await enableOffer();
+    const svc = createRecoveryEmail({ store, params: PARAMS, clock });
+    const runId = await approvedRun(svc);
+    expect(await run()).toEqual({ state: 'skipped', runId, code: 'PAUSED' });
+    expect((await store.collection('recovery_email_runs').findOne({ runId })).state).toBe('approved');
+    expect(sent).toHaveLength(0);
+  });
+
+  test('empty allowlist (fail closed): the run completes with zero sends', async () => {
+    await enableOffer();
+    const svc = createRecoveryEmail({ store, params: PARAMS, clock });
+    await svc.resume();
+    const runId = await approvedRun(svc);
+    expect(await run({ ...KEYED, RECOVERY_EMAIL_ALLOWLIST: '' })).toMatchObject({ state: 'completed', runId, sent: 0 });
+    expect(sent).toHaveLength(0);
+  });
+
+  test('executes only the oldest approved run, once; aggregates only', async () => {
+    await enableOffer();
+    const svc = createRecoveryEmail({ store, params: PARAMS, clock });
+    await svc.resume();
+    const first = await approvedRun(svc, 1);
+    const second = await approvedRun(svc, 1);
+    const r1 = await run();
+    expect(r1).toEqual({
+      state: 'completed', runId: first, sent: 1, failed: 0, unknown: 0, deferred: 0,
+    });
+    expect(JSON.stringify(r1)).not.toMatch(/@|auth0/);
+    expect((await run()).runId).toBe(second);
+    expect(await run()).toEqual({ state: 'idle' });
+    expect(sent.map((m) => m.to.email).sort()).toEqual(['ava@example.com', 'ben@example.com']);
   });
 });
 

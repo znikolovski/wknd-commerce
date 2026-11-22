@@ -1,12 +1,17 @@
 name: AIO App CI
 
+# Pull-request checks run the project's unit/contract tests and lint. They need no Adobe IMS
+# credentials or Runtime namespace (those are only required by deploy workflows), so the job
+# does not log in to Adobe and cannot fail on missing deploy secrets.
 on: [pull_request]
+permissions:
+  contents: read
 jobs:
   test:
     name: Test PR
     runs-on: ${{ matrix.os }}
-    environment: stage
     strategy:
+      fail-fast: false
       matrix:
         node-version: ['20']
         os: [macOS-latest, ubuntu-latest, windows-latest]
@@ -17,33 +22,10 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: ${{ matrix.node-version }}
-      - name: npm install
-        run: npm i
-      - name: Setup CLI
-        uses: adobe/aio-cli-setup-action@1.3.0
-        with:
-          os: ${{ matrix.os }}
-          version: 11.x.x
-      - name: Auth
-        uses: adobe/aio-apps-action@4.1.0
-        with:
-          os: ${{ matrix.os }}
-          command: oauth_sts
-          CLIENTID: ${{ secrets.CLIENTID }}
-          CLIENTSECRET: ${{ secrets.CLIENTSECRET }}
-          TECHNICALACCOUNTID: ${{ secrets.TECHNICALACCID }}
-          TECHNICALACCOUNTEMAIL: ${{ secrets.TECHNICALACCEMAIL }}
-          IMSORGID: ${{ secrets.IMSORGID }}
-          SCOPES: ${{ secrets.SCOPES }}
-      - name: Build
-        env:
-          AIO_RUNTIME_NAMESPACE: ${{ secrets.AIO_RUNTIME_NAMESPACE }}
-        uses: adobe/aio-apps-action@4.1.0
-        with:
-          os: ${{ matrix.os }}
-          command: build
+          cache: npm
+      - name: npm ci
+        run: npm ci
       - name: Test
-        uses: adobe/aio-apps-action@4.1.0
-        with:
-          os: ${{ matrix.os }}
-          command: test
+        run: npm test
+      - name: Lint
+        run: npm run lint

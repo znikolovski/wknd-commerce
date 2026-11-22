@@ -12,6 +12,38 @@ extend type Mutation {
   discount is applied only when the shopper applies the returned coupon code to that cart.
   """
   claimWkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+  """
+  Applies the signed-in shopper's recovery offer to exactly the cart state they reviewed.
+  Errors (extensions.code): CART_CHANGED when expected_cart_version is not the current version
+  or the cart changed during the write; OFFER_NOT_BETTER when the current promotion already
+  saves as much or more; RECOVERY_OFFER_UNAVAILABLE otherwise. Nothing is written on error.
+  Claims the entitlement first if it was only ELIGIBLE.
+  """
+  applyWkndRecoveryOffer(cart_id: String!, expected_cart_version: String!): WkndRecoveryOfferApplication!
+  """
+  Removes the recovery offer's coupon from exactly the reviewed cart state. Leaves any other
+  coupon alone (NOT_APPLIED). Never revokes the entitlement or a redemption. Errors:
+  CART_CHANGED.
+  """
+  removeWkndRecoveryOffer(cart_id: String!, expected_cart_version: String!): WkndRecoveryOfferApplication!
+}
+
+extend type Cart {
+  "Opaque concurrency token for this cart state; changes on every cart write. Pass it back as expected_cart_version."
+  wknd_cart_version: String!
+}
+
+enum WkndRecoveryOfferApplicationOutcome {
+  APPLIED
+  ALREADY_APPLIED
+  REMOVED
+  NOT_APPLIED
+}
+
+type WkndRecoveryOfferApplication {
+  outcome: WkndRecoveryOfferApplicationOutcome!
+  "The cart after the call (its wknd_cart_version is the new reviewed state)."
+  cart: Cart!
 }
 
 enum WkndRecoveryOfferStatus {

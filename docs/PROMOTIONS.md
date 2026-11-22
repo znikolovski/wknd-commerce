@@ -156,6 +156,9 @@ default off, never inferred from sign-in or checkout). Safety defaults:
 
 - **Paused** until `resume()`; **test-recipient allowlist** on (`RECOVERY_EMAIL_ALLOWLIST`) until
   `RECOVERY_EMAIL_ALLOWLIST_DISABLED=true`.
+  Entries are exact addresses (`name@example.com`) or whole domains (`@example.com`). A domain
+  entry matches only that exact domain, not subdomains. The demo uses
+  `@adobe.com,jaggah@gmail.com,znikolovski24@gmail.com` in both environments.
 - Runs: `requestRun(ctx, { maxRecipients ≤ 50 })` → `approveRun` by a **different** IMS subject,
   bound to the same template id and size, valid 24h → `executeRun({ runId })`.
 - Every recipient is rechecked (consent, suppression, allowlist, 24h–7d window, no purchase since,

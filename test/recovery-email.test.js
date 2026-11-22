@@ -11,7 +11,9 @@ const { runGraphQL } = require('../lib/graphql-server');
 const { resetCatalogCache, loadCatalog } = require('../lib/catalog');
 const { migrateLegacyPromotions, createPromotionService } = require('../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../lib/recovery-policy');
-const { createRecoveryEmail, handleBrevoWebhook, executeNextApprovedRun } = require('../lib/recovery-email');
+const {
+  createRecoveryEmail, handleBrevoWebhook, executeNextApprovedRun, allowlisted,
+} = require('../lib/recovery-email');
 const { BrevoError } = require('../lib/brevo');
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
@@ -232,6 +234,41 @@ describe('execution', () => {
     await svc.resume();
     await svc.executeRun({ runId: await approvedRun(svc) });
     expect(sent.map((m) => m.to.email)).toEqual(['ben@example.com']);
+  });
+});
+
+describe('allowlist: exact addresses and whole domains', () => {
+  const list = new Set(['@adobe.com', 'jaggah@gmail.com', 'znikolovski24@gmail.com']);
+
+  test.each([
+    ['someone@adobe.com', true],
+    ['Some.One@ADOBE.com ', true],
+    ['jaggah@gmail.com', true],
+    ['ZNikolovski24@gmail.com', true],
+    ['other@gmail.com', false],
+    ['x@sub.adobe.com', false],
+    ['x@adobe.com.evil.example', false],
+    ['x@notadobe.com', false],
+    ['adobe.com', false],
+    ['@adobe.com', false],
+    ['', false],
+  ])('%s → %s', (email, expected) => {
+    expect(allowlisted(list, email)).toBe(expected);
+  });
+
+  test('a run sends only to allowlisted domains and addresses', async () => {
+    await shopper('auth0|adobe', 'tester@adobe.com');
+    await shopper('auth0|gmail', 'stranger@gmail.com');
+    await enableOffer();
+    const params = { ...PARAMS, RECOVERY_EMAIL_ALLOWLIST: '@adobe.com,jaggah@gmail.com' };
+    const svc = createRecoveryEmail({
+      store, params, clock, brevo,
+    });
+    await svc.resume();
+    const { runId } = await svc.requestRun(operator('marketer'), { maxRecipients: 10 });
+    await svc.approveRun(operator('approver'), { runId, templateId: '12', maxRecipients: 10 });
+    expect(await svc.executeRun({ runId })).toMatchObject({ sent: 1 });
+    expect(sent.map((m) => m.to.email)).toEqual(['tester@adobe.com']);
   });
 });
 

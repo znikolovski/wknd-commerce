@@ -14,7 +14,7 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 | `lib/promotion-evaluation.js` | Pure cart evaluation: sale prices first, eligible explicit coupon wins, otherwise best automatic; largest-remainder allocation; GST |
 | `lib/promotion-effects.js` | Durable effect intent + global promotion invalidation (never product sale prices or PDP prerenders) |
 | `lib/recovery-policy.js` | Protected recovery policy (10%, AUD 25 cap), 24h–7d cohort, entitlements, single-redemption reservation |
-| `lib/shopper-audiences.js` | Fail-closed audience evidence resolver (no verified AAM provider) |
+| `lib/shopper-audiences.js` | `wknd.audience-evidence/v1-draft`, **inert** (no callers). A canonical server-side registry (environment, key, version, AAM source, merge rule and segment IDs) resolves only entries whose activation gates are all attested: identity ingestion, merge rule, membership, account switch, logout, withdrawal and provenance. The resolver returns `qualified` / `notQualified` / `unavailable`. The shopper binding is the existing recovery `shopperKey`, derived server-side. Evidence must match the environment, segment version, binding and trusted provenance. Freshness limits have no defaults (not frozen), and validity is capped at the earlier of the source expiry and the age limit. Caller segment IDs, ECIDs and cookies are ignored. Draft Stage pilot bindings are registered as `draft` and can't resolve |
 | `scripts/migrate-promotions.mjs` | Explicit idempotent migration, recovery bootstrap, storage capability check |
 
 ## Management service

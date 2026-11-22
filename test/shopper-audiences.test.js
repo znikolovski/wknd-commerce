@@ -18,7 +18,7 @@ const FRESH = {
 const at = (d) => new Date(NOW + d).toISOString();
 const attestation = Object.fromEntries(ACTIVATION_GATES.map((g) => [g, `proof_${g}_0001`]));
 const ENTRY = {
-  key: 'climbing-planner', env: 'stage', version: 2, provider: 'aam', transport: 'aam-s2s-read', sourceDpid: '1547309', mergeRuleId: '1547344', segmentId: '27507404', status: 'verified', attestation,
+  key: 'climbing-planner', env: 'stage', version: 2, provider: 'aam', transport: 'transport-under-validation', sourceDpid: '1547309', mergeRuleId: '1547344', segmentId: '27507404', status: 'verified', attestation,
 };
 const registry = (entries = [ENTRY]) => createAudienceRegistry(entries);
 const customer = { sub: SUB };
@@ -26,11 +26,12 @@ const customer = { sub: SUB };
 function evidence(o = {}) {
   return {
     status: 'qualified',
+    complete: true,
     shopperBinding: shopperKey(ISSUER, SUB),
     env: 'stage',
     segment: { key: 'climbing-planner', version: 2 },
     provenance: {
-      transport: 'aam-s2s-read', sourceDpid: '1547309', mergeRuleId: '1547344', segmentId: '27507404',
+      transport: 'transport-under-validation', sourceDpid: '1547309', mergeRuleId: '1547344', segmentId: '27507404',
     },
     source: 'aam',
     evaluatedAt: at(-20 * S),
@@ -126,7 +127,7 @@ describe('evidence contract', () => {
       shopperBinding: shopperKey(ISSUER, SUB),
       env: 'stage',
       segment: {
-        key: 'climbing-planner', version: 2, segmentId: '27507404', sourceDpid: '1547309', mergeRuleId: '1547344', transport: 'aam-s2s-read',
+        key: 'climbing-planner', version: 2, segmentId: '27507404', sourceDpid: '1547309', mergeRuleId: '1547344', transport: 'transport-under-validation',
       },
     });
     expect(out).toEqual({
@@ -151,6 +152,15 @@ describe('evidence contract', () => {
     for (const c of [undefined, null, {}, { sub: '' }, { sub: '   ' }]) {
       // eslint-disable-next-line no-await-in-loop
       expect(await run(evidence(), { customer: c })).toEqual({ status: 'unavailable', reason: 'NO_VERIFIED_IDENTITY' });
+    }
+  });
+
+  test('a segment missing from an incomplete or unconfirmed evaluation is never notQualified', async () => {
+    for (const complete of [undefined, false, 'true', 1]) {
+      // eslint-disable-next-line no-await-in-loop
+      expect(await run(evidence({ status: 'notQualified', complete }))).toEqual({ status: 'unavailable', reason: 'INCOMPLETE_EVALUATION' });
+      // eslint-disable-next-line no-await-in-loop
+      expect(await run(evidence({ complete }))).toEqual({ status: 'unavailable', reason: 'INCOMPLETE_EVALUATION' });
     }
   });
 

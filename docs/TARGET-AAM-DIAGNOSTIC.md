@@ -220,6 +220,7 @@ Opt-in is separate and unchecked by default; display sanctioned wording, not bun
 | Between the first check and the claim | Post-claim authoritative check | provider: post-claim check |
 | During anonymous MID acquisition | Withdrawal removes the anonymous claim; persistence loses CAS ownership, so no declared ID can be sent | provider: anonymous mint withdrawal |
 | During declared-ID transmission | The MID is already durable; withdrawal changes the claim into pending retirement. The late final write fails CAS, retaining the cleanup identifier | id-linkage: in-flight withdrawal |
+| During the pre-link consent lookup | Re-read the stored claim after the lookup. Retirement, a different etag, or insufficient lease time prevents any CID request | provider: paused beforeLink / lease budget / replaced claim |
 | After `resolve`, before the Target request | `confirm()` (same `grantId`) immediately before sending. If it fails, nothing is sent. | diagnostic: before the Target request |
 | During the Target request | `confirm()` again before returning. A withdrawal or reconsent gives `consent-changed` with no marker. | diagnostic and action: during the Target request |
 
@@ -245,6 +246,11 @@ default provider is still `unavailableBindingProvider`.
   These two use cases are [documented by Adobe](https://experienceleague.adobe.com/en/docs/id-service/using/implementation/direct-integration-examples).
   A failed MID persistence never sends a declared ID. A lost anonymous response may leave an unknown
   anonymous MID upstream, but this implementation has not linked it to a declared ID.
+  Immediately before linking, re-read CAS ownership after the consent lookup: the same etag must
+  still identify this shopper/grant/org/DPID/MID in `issuing`, `phase:'linking'`, with **more than one
+  full configured request timeout remaining**. A retired/replaced claim sends no CID; insufficient
+  lease returns `lease-insufficient` and retains pending retirement. No expired lease is renewed to
+  force a send. This check does not make an external request atomic with subsequent withdrawal.
   - No traits, `d_cb`, headers, cookies, browser identifiers or caller input.
   - `redirect:'error'`, `credentials:'omit'`, with a timeout.
 - **Response:** documented wire types only. `d_mid` must be a 38-digit string. `dcs_region` and `id_sync_ttl`
@@ -286,6 +292,7 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 | ID Service failure | Anonymous failure leaves a reclaimable anonymous lease. Linking timeout, lost/invalid response or HTTP failure retains pending retirement. If a store outage prevents retirement, the already-durable known-MID claim remains; its expired lease cannot mint another MID. |
 | Consent missing / withdrawn | Known IDs are retained for retirement; anonymous claims are removed by CAS; nothing is issued. |
 | Consent failure / malformed | Deny, no mutation. |
+| Unknown stored state | `invalid-record-state`, no overwrite, removal or network request; existing known IDs remain intact. |
 | Withdrawal while issuance is in flight | Removing an anonymous claim prevents later linking. Retiring a known-MID claim preserves its ID and changes the etag; a late response cannot restore a usable binding. |
 | Reconsent (new `grantId`) | Consent may be granted again, but a known ID from the old generation becomes/stays pending retirement. `resolve` returns `retirement-pending`, never overwrites that work or mints another linked MID. No automatic retirement release is implemented. |
 | Account switch | Bindings are keyed by `shopperKey(AUTH0_ISSUER, sub)`. Anonymous acquisition omits `d_mid`; linking uses only that shopper's persisted MID. Another shopper's binding, or a record carrying a different org/DPID, fails closed. |

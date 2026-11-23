@@ -310,6 +310,100 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
 });
 
 describe('durable issuance and retirement boundaries', () => {
+  test('retirement while beforeLink consent lookup is paused prevents any late CID transmission', async () => {
+    const store = memoryStore();
+    const consent = consentSource();
+    let entered;
+    let release;
+    const started = new Promise((resolve) => { entered = resolve; });
+    const paused = new Promise((resolve) => { release = resolve; });
+    consent.lookup.mockImplementation(async () => {
+      if (consent.lookup.mock.calls.length === 3) {
+        entered();
+        await paused;
+      }
+      return GRANTED;
+    });
+    const first = provider({ store, consent });
+    const pending = resolveA(first.p);
+    await started;
+    first.advance(DEFAULT_LEASE_MS + 1);
+    const second = provider({ store, consent, clock: T0 + DEFAULT_LEASE_MS + 1 });
+    expect(await resolveA(second.p)).toEqual(un('retirement-pending'));
+    release();
+    expect(await pending).toEqual(un('retirement-pending'));
+    expect(first.fetchImpl.mock.calls.map(([url]) => new URL(url).searchParams.has('d_cid'))).toEqual([false]);
+    expect(second.fetchImpl).not.toHaveBeenCalled();
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A });
+  });
+
+  test.each([DEFAULT_LEASE_MS + 1, DEFAULT_LEASE_MS - 1000])(
+    'a known-MID lease with elapsed time %s cannot send beyond its remaining timeout budget',
+    async (elapsed) => {
+      const consent = consentSource();
+      let entered;
+      let release;
+      const started = new Promise((resolve) => { entered = resolve; });
+      const paused = new Promise((resolve) => { release = resolve; });
+      consent.lookup.mockImplementation(async () => {
+        if (consent.lookup.mock.calls.length === 3) {
+          entered();
+          await paused;
+        }
+        return GRANTED;
+      });
+      const first = provider({ consent });
+      const pending = resolveA(first.p);
+      await started;
+      first.advance(elapsed);
+      release();
+      expect(await pending).toEqual(un('lease-insufficient'));
+      expect(first.fetchImpl.mock.calls.map(([url]) => new URL(url).searchParams.has('d_cid'))).toEqual([false]);
+      expect(first.store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A });
+    },
+  );
+
+  test('a replaced CAS claim cannot transmit a CID even if its consent and lease remain valid', async () => {
+    const consent = consentSource();
+    let entered;
+    let release;
+    const started = new Promise((resolve) => { entered = resolve; });
+    const paused = new Promise((resolve) => { release = resolve; });
+    consent.lookup.mockImplementation(async () => {
+      if (consent.lookup.mock.calls.length === 3) {
+        entered();
+        await paused;
+      }
+      return GRANTED;
+    });
+    const first = provider({ consent });
+    const pending = resolveA(first.p);
+    await started;
+    const current = await first.store.get(KEY);
+    await first.store.put(KEY, current.record, { ifMatch: current.etag });
+    release();
+    expect(await pending).toEqual(un('cas-conflict'));
+    expect(first.fetchImpl.mock.calls.map(([url]) => new URL(url).searchParams.has('d_cid'))).toEqual([false]);
+    expect(first.store.record(KEY)).toMatchObject({ state: 'issuing', priorEcid: ECID_A });
+  });
+
+  test.each(['ecid', 'priorEcid'])('an unknown stored state with %s fails explicitly without changing its known ID', async (field) => {
+    const store = memoryStore();
+    await store.put(KEY, {
+      state: 'unexpected-state', shopperKey: KEY, subject: SUBJECT,
+      consentGrantId: GRANTED.grantId, [field]: ECID_A,
+    }, { ifMatch: null });
+    const before = structuredClone(store.data.get(KEY));
+    store.put.mockClear();
+    const { p, consent, fetchImpl } = provider({ store });
+    expect(await resolveA(p)).toEqual(un('invalid-record-state'));
+    expect(store.data.get(KEY)).toEqual(before);
+    expect(store.put).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(consent.lookup).not.toHaveBeenCalled();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   test('a legacy ambiguous issuing record is quarantined, never mistaken for anonymous acquisition', async () => {
     const store = memoryStore();
     await store.put(KEY, {

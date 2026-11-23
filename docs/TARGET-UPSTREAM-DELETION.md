@@ -46,6 +46,43 @@ Local lifecycle containment now works as follows:
 The raw binding-store `remove` primitive remains available for disposable CAS probes. It is **not**
 the withdrawal lifecycle: operational cleanup must not bypass retained retirement work.
 
+## Selective Stage release dependency (no deployment performed here)
+
+Runtime actions bundle their dependencies independently. Updating only the diagnostic does **not**
+replace the old deletion helper embedded in other live actions.
+
+| Required Stage action | Reachable linkage-withdrawal path |
+|---|---|
+| `commerce/target-diagnostic` | `lib/target-diagnostic-action.js` → `setIdLinkageConsent` → `removeBindingsForSubject` |
+| `commerce/brevo-webhook` | `actions/brevo-webhook/index.js` → `handleBrevoWebhook` → `recordSuppression('unsubscribed')` → `withdrawIdLinkageForEmail` → `removeBindingsForSubject` |
+| `commerce/promotions-worker` | `actions/promotions-worker/index.js` → `executeNextApprovedRun` → `executeRun` → `syncSuppressions` → `recordSuppression('unsubscribed')` → `withdrawIdLinkageForEmail` → `removeBindingsForSubject` |
+
+`commerce-admin/promotions` imports the recovery-email module but exposes status, approval and pause
+operations, **not** execution/suppression sync. `commerce/storefront-graphql` reaches email-purpose
+setters through resolvers, which do not withdraw linkage. Module inclusion alone is not a reachable
+withdrawal route; these actions are not part of this selective lifecycle release.
+
+Future authorized release order:
+
+1. Keep ID Service, binding-store approval, remote Target and financial gates OFF. Build the three
+   required action bundles from the same reviewed revision. Do not modify shared CLI settings,
+   credentials, packages, triggers or unrelated actions.
+2. Selectively replace **only** `commerce/brevo-webhook` and `commerce/promotions-worker` first,
+   preserving their existing parameters, authentication, annotations, limits and schedule.
+   Verify the new exec fingerprints and the retention-aware helper in each built artifact.
+3. Establish that old-code activations, including queued/in-flight work, have drained before producing
+   any known-ID retirement records. The manifest limits are 30 seconds for the webhook and 120
+   seconds for the worker, but waiting alone does not prove queue drainage. Retain private,
+   sanitized deployment/drain evidence.
+4. Then selectively replace `commerce/target-diagnostic`, still with ID Service OFF. Verify those
+   three intended action changes, unchanged package inputs/bindings/annotations, and unchanged
+   fingerprints for every unrelated action. Consent-status/grant/withdrawal acceptance is distinct
+   from ID lifecycle activation.
+5. Only after the remaining approved device opt-out observation/coverage/release contract and live
+   storage acceptance are satisfied may ID Service activation be considered. Never activate against
+   old deletion callers. Once retained IDs exist, do not roll any of these three actions back to an
+   old `deleteMany` helper; disable upstream work while preserving retention-aware withdrawal code.
+
 ## Separately authorized deletion requests
 
 1. **Contain and scope.** Authenticate the requester through the established privacy process.

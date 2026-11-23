@@ -51,17 +51,31 @@ Local lifecycle containment now works as follows:
 Configuration is final server input `TARGET_ID_RETIREMENT_ENABLED` from
 `WKND_TARGET_ID_RETIREMENT_ENABLED` (empty/OFF by default), with binding-store approval, exact
 verified org, DPID, environment/namespace and bounded timeout/lease. It is independent of ID issuance
-and Target activation. Keep it OFF until the three-action compatible release/drain and live storage
+and Target activation. Keep it OFF until the three-action generation-isolated release and live storage
 acceptance are verified. Anonymous-mint and last-bound region hints and server-issued provenance are
 persisted before/after linking and preserved through retirement; legacy unproven IDs are refused.
 
 The raw binding-store `remove` primitive remains available for disposable CAS probes. It is **not**
 the withdrawal lifecycle: operational cleanup must not bypass retained retirement work.
 
-## Selective Stage release dependency (no deployment performed here)
+## Generation-isolated selective Stage release
 
 Runtime actions bundle their dependencies independently. Updating only the diagnostic does **not**
 replace the old deletion helper embedded in other live actions.
+
+`BINDING_COLLECTION` is the fixed `target_id_bindings_v2` in `lib/target-binding-store.js`.
+Legacy deletion helpers and v12 retention bundles address only `target_id_bindings`; their
+queued/in-flight activations cannot erase v2 IDs. No configurable generation, migration or deletion
+of the old collection is introduced. This is structural non-erasure, **not queue-drain evidence**.
+The same fixed default is used by `createBindingStore`, `removeBindingsForSubject`, both diagnostic
+provider/retirement call sites and `verifyTargetBindingCas`.
+
+An old handler may still withdraw authoritative customer consent. A v2 binding then cannot pass
+`confirm` or authorize reuse. The explicitly gated retirement operation can reconcile that owned,
+server-issued bound/linking MID under twice-verified withdrawn consent, using the observed binding
+etag. It preserves the MID, provenance and region hints as pending retirement; that invocation
+makes **no upstream request** and never grants consent. Unknown/absent purpose does not read the
+binding store. Reconsent before confirmation aborts; a newer binding defeats the stale CAS.
 
 | Required Stage action | Reachable linkage-withdrawal path |
 |---|---|
@@ -82,21 +96,31 @@ Future authorized release order:
 2. Selectively replace **only** `commerce/brevo-webhook` and `commerce/promotions-worker` first,
    preserving their existing parameters, authentication, annotations, limits and schedule.
    Verify the new exec fingerprints and the retention-aware helper in each built artifact.
-3. Establish that old-code activations, including queued/in-flight work, have drained before producing
-   any known-ID retirement records. The manifest limits are 30 seconds for the webhook and 120
-   seconds for the worker, but waiting alone does not prove queue drainage. Retain private,
-   sanitized deployment/drain evidence.
+3. Verify both built callers use `target_id_bindings_v2`, while legacy binding helpers use only
+   `target_id_bindings`. The saved v11 artifacts contain no binding-store module/reference; the
+   actual published v12 artifacts embed the old literal, not v2. Retain the old collection untouched and establish aggregate-only zero
+   old known-ID/bound/retiring counts. Require fresh real disposable CAS acceptance and verified
+   cleanup on v2 in the exact Stage workspace. This structural barrier replaces unavailable
+   queue-drain proof; neither elapsed time nor empty activation history establishes drainage.
 4. Then selectively replace `commerce/target-diagnostic`, still with ID Service OFF. Verify those
    three intended action changes, unchanged package inputs/bindings/annotations, and unchanged
    fingerprints for every unrelated action. Consent-status/grant/withdrawal acceptance is distinct
    from ID lifecycle activation.
-5. Enable the retirement operation only after compatible artifacts, drainage and live CAS acceptance.
+5. Enable the retirement operation only after compatible isolated artifacts and live CAS acceptance.
    This source implementation was tested only with mocks; actual submission/observation semantics
    and region/destination coverage still require sanctioned live verification. Only after the
    remaining approved device opt-out observation/coverage/release contract and live
    storage acceptance are satisfied may ID Service activation be considered. Never activate against
    old deletion callers. Once retained IDs exist, do not roll any of these three actions back to an
    old `deleteMany` helper; disable upstream work while preserving retention-aware withdrawal code.
+
+On 2026-11-23 the publisher-process Stage CAS probe passed duplicate insert, concurrent conditional
+writers, stale update/delete and ABA checks against `target_id_bindings_v2`, with disposable-key
+cleanup verified. Aggregate document counts in both old and v2 collections were zero before/after;
+no old collection/customer/consent/identity write was made. This is DB CAS acceptance, not Runtime
+region, upstream opt-out, qualification or withdrawal completion. All 24 live action fingerprints
+remained unchanged during that probe: webhook/worker `0.0.12`, diagnostic `0.0.2`. This correction
+was **not deployed**; its exact three-action re-release still requires review and authorization.
 
 ## Separately authorized deletion requests
 

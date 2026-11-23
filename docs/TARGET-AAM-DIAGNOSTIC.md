@@ -328,6 +328,9 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
   - create-if-absent: `insertOne`, with a duplicate-key error meaning `null`;
   - conditional update: `updateOne({_id, etag}, {$set})` succeeding only when `matchedCount === 1`;
   - removal: `deleteOne({_id[, etag]})`.
+- The fixed collection is `target_id_bindings_v2`. Old independently bundled v11/v12 callers touch
+  only `target_id_bindings`, which remains untouched; no migration or runtime-selectable generation.
+  Structural non-erasure replaces unavailable activation-drain proof, not consent verification.
 - Records have three persisted states: `issuing` (a lease with `leaseUntil` and `priorEcid`), `bound`,
   and `retiring` (known ECID and `retirement.state='pending'`). Anonymous claims may be removed.
   - Issuing records explicitly distinguish `phase:'minting'` from `phase:'linking'`. Legacy ambiguous
@@ -372,6 +375,12 @@ Only that verified shopper's persisted `retiring` record, with server-issued pro
 matching org/DPID and a retained valid MID, is eligible. Absent-purpose status, withdrawal and retirement
 remain read-only. No account/customer mutation or consent change is made by retirement.
 
+- A legacy handler may withdraw the customer purpose while touching only the old collection.
+  Under withdrawn consent, an owned server-issued v2 bound/linking record is reconciled to pending
+  retirement by etag after a second consent check. This invocation returns `reconciled-pending`
+  with **no remote request**, no new grant and no ID loss. Unknown/absent consent is read-only before
+  binding access; reconsent or a newer binding prevents stale reconciliation. Reconsent never
+  permits reuse of a retained old-grant MID.
 - `submit`: persist a scoped CAS sending claim before a cookieless, redirect-refusing device-MID
   request to `ags050.demdex.net/demoptout.jpg`. HTTP success records `submitted`, not proven opt-out.
 - `observe`: after a submitted **or unknown** scoped submission, request only `d_mid`, `d_orgid`,
@@ -390,7 +399,7 @@ remain read-only. No account/customer mutation or consent change is made by reti
 1. **Operational wording.** The operational owner sanctions the ID-linkage wording and adds its
    nonempty version to `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. Legal review is not a project gate.
    The separately owned storefront UI calls `op:'consent'` with the shopper's Auth0 token.
-2. **Backend CAS.** Approve the `target_id_bindings` collection, then verify on each selected workspace's App Builder
+2. **Backend CAS.** Approve the fixed `target_id_bindings_v2` collection, then verify on each selected workspace's App Builder
    Database Storage that:
    - a duplicate `_id` insert fails;
    - `updateOne({_id, etag})` reports `matchedCount` 0 or 1;

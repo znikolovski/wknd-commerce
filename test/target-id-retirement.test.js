@@ -72,11 +72,18 @@ test.each([
   ['browser source', { ecidSource: 'browser-relayed' }, 'unverified-record'],
   ['wrong org', { orgId: '0'.repeat(24) + '@AdobeOrg' }, 'foreign-record'],
   ['wrong owner', { subject: sha256('another-subject') }, 'foreign-record'],
-  ['usable binding', { state: 'bound' }, 'not-retiring'],
 ])('%s is refused without changing the retained ID', async (_, over, reason) => {
   const h = await harness({ over });
   const before = await h.store.get(KEY);
   expect(await h.run('submit')).toMatchObject({ reason });
+  expect(await h.store.get(KEY)).toEqual(before);
+  expect(h.fetchImpl).not.toHaveBeenCalled();
+});
+
+test('a usable binding with still-granted consent is not retired', async () => {
+  const h = await harness({ over: { state: 'bound' }, deps: { consent: { lookup: async () => ({ state: 'granted', grantId: 'old-grant' }) } } });
+  const before = await h.store.get(KEY);
+  expect(await h.run('submit')).toMatchObject({ reason: 'not-retiring' });
   expect(await h.store.get(KEY)).toEqual(before);
   expect(h.fetchImpl).not.toHaveBeenCalled();
 });

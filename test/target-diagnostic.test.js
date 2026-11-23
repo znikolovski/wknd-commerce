@@ -20,9 +20,11 @@ const PARAMS = {
   AUTH0_ISSUER: ISSUER,
 };
 const BINDING = {
-  source: 'server-issued', ecid: '1'.repeat(38), locationHint: 9, blob: 'server-blob',
+  source: 'server-issued', ecid: '1'.repeat(38), locationHint: 9, blob: 'server-blob', consentGrantId: 'grant-1',
 };
-const provider = (binding = BINDING) => ({ resolve: jest.fn(async () => binding) });
+const provider = (binding = BINDING, confirm = async () => true) => ({
+  resolve: jest.fn(async () => binding), confirm: jest.fn(confirm),
+});
 const offer = (marker, extra = {}) => ({
   type: 'json',
   content: {
@@ -88,15 +90,35 @@ describe('Target AAM diagnostic: identity trust', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('a failing binding provider is unavailable, not an error', async () => {
-    const bindingProvider = { resolve: async () => { throw new Error('boom'); } };
-    expect((await run({ bindingProvider })).reason).toBe('no-trusted-binding');
+  test('a failing binding provider is a categorized binding-error, never a decision', async () => {
+    const fetchImpl = fakeFetch({});
+    const bindingProvider = { resolve: async () => { throw new Error('boom'); }, confirm: async () => true };
+    expect(await run({ bindingProvider, fetchImpl })).toMatchObject({ status: 'unavailable', reason: 'binding-error' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['a known category', 'consent-withdrawn', 'consent-withdrawn'],
+    ['free text (never echoed)', 'auth0|leak 1111', 'other'],
+  ])('a provider refusal with %s is reported by category only', async (_, reason, expected) => {
+    const r = await run({ bindingProvider: provider({ source: 'unavailable', reason }) });
+    expect(r).toMatchObject({ status: 'unavailable', reason: 'no-trusted-binding', bindingReason: expected });
+    expect(JSON.stringify(r)).not.toContain('leak');
+  });
+
+  test('a provider without confirm() is never used (consent cannot be re-checked)', async () => {
+    const fetchImpl = fakeFetch({});
+    const r = await run({ bindingProvider: { resolve: async () => BINDING }, fetchImpl });
+    expect(r).toMatchObject({ reason: 'no-trusted-binding', bindingReason: 'unconfirmable' });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   test('the provider is asked only for the server-derived shopper key and verified sub', async () => {
     const bindingProvider = provider();
     await run({ bindingProvider });
     expect(bindingProvider.resolve).toHaveBeenCalledWith({ shopperKey: KEY, sub: SUB });
+    expect(bindingProvider.confirm).toHaveBeenCalledTimes(2);
+    expect(bindingProvider.confirm).toHaveBeenCalledWith({ shopperKey: KEY, sub: SUB, binding: BINDING });
   });
 
   test('caller-supplied identity, location, property, mbox or offer values are ignored', async () => {
@@ -121,6 +143,39 @@ describe('Target AAM diagnostic: identity trust', () => {
     expect(sent.prefetch).toBeUndefined();
     expect(JSON.stringify(sent)).not.toContain('attacker');
     expect(fetchImpl.mock.calls[0][0]).toMatch(/^https:\/\/exampleclient\.tt\.omtrdc\.net\/rest\/v1\/delivery\?client=exampleclient&sessionId=/);
+  });
+});
+
+describe('Target AAM diagnostic: consent generation re-checks', () => {
+  test('withdrawal or reconsent after resolve but before the Target request: nothing is sent', async () => {
+    const fetchImpl = fakeFetch(delivery([offer('climbing-planner')]));
+    const r = await run({ bindingProvider: provider(BINDING, async () => false), fetchImpl });
+    expect(r).toMatchObject({ status: 'unavailable', reason: 'consent-changed' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('withdrawal during the Target request: the decision is never exposed', async () => {
+    const answers = [true, false];
+    const r = await run({ bindingProvider: provider(BINDING, async () => answers.shift()) });
+    expect(r).toMatchObject({ status: 'unavailable', reason: 'consent-changed' });
+    expect(r.marker).toBeUndefined();
+  });
+
+  test('a failing re-check is binding-error, never a decision', async () => {
+    const answers = [true];
+    const confirm = async () => {
+      if (answers.length) return answers.shift();
+      throw new Error('db');
+    };
+    const r = await run({ bindingProvider: provider(BINDING, confirm) });
+    expect(r).toMatchObject({ status: 'unavailable', reason: 'binding-error' });
+    expect(r.marker).toBeUndefined();
+  });
+
+  test('a non-boolean confirm answer is not consent', async () => {
+    const fetchImpl = fakeFetch({});
+    expect((await run({ bindingProvider: provider(BINDING, async () => 'yes'), fetchImpl })).reason).toBe('consent-changed');
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
 
@@ -161,6 +216,23 @@ describe('Target AAM diagnostic: decisions are inert markers, never evidence', (
     const r = await run({ fetchImpl: fakeFetch(body) });
     expect(r).toMatchObject({ status: 'unavailable', reason });
     expect(r.marker).toBeUndefined();
+  });
+
+  test.each([
+    ['a JSON array body', [delivery([offer('control')])]],
+    ['a null body', null],
+    ['execute that is not an object', { execute: [] }],
+    ['mboxes that is not an array', { execute: { mboxes: { name: MBOX } } }],
+    ['a non-object mbox entry', { execute: { mboxes: [null] } }],
+    ['options that is not an array', { execute: { mboxes: [{ name: MBOX, options: offer('control') }] } }],
+  ])('hostile/malformed Target JSON (%s) is target-invalid-response, not transport', async (_, body) => {
+    expect(parseDecision(body)).toEqual({ status: 'unavailable', reason: 'target-invalid-response' });
+    expect(await run({ fetchImpl: fakeFetch(body) })).toMatchObject({ status: 'unavailable', reason: 'target-invalid-response' });
+  });
+
+  test('an unparseable Target body is target-invalid-response, not target-unreachable', async () => {
+    const fetchImpl = jest.fn(async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('bad'); } }));
+    expect((await run({ fetchImpl })).reason).toBe('target-invalid-response');
   });
 
   test('Target errors and timeouts are unavailable', async () => {

@@ -1,7 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const {
-  checkDeployEnv, referencedNames, parseEnv, GATES,
+  checkDeployEnv, referencedNames, parseEnv, GATES, TARGET_INPUTS,
 } = require('../lib/deploy-env');
 
 const root = path.join(__dirname, '..');
@@ -97,6 +97,46 @@ describe('deploy input check (fail closed)', () => {
       const text = manifests[0];
       expect(text.match(/\$WKND_MCP_DELEGATION_SECRET_PREVIOUS/g)).toHaveLength(1);
       expect(text).toContain('MCP_DELEGATION_SECRET_PREVIOUS: $WKND_MCP_DELEGATION_SECRET_PREVIOUS');
+    });
+  });
+
+  describe('Stage-only Target diagnostic / ID linkage (off by default)', () => {
+    const yaml = require('js-yaml');
+    const action = () => yaml.load(manifests[0]).application.runtimeManifest.packages.commerce.actions['target-diagnostic'];
+
+    test('the action is a final raw web action whose every WKND_TARGET_* input is optional (deploys empty = off)', () => {
+      const a = action();
+      expect(a).toMatchObject({ function: 'actions/target-diagnostic/index.js', web: 'raw' });
+      expect(a.annotations).toMatchObject({ final: true, 'require-adobe-auth': false });
+      const refs = Object.values(a.inputs).map((v) => String(v).replace(/^\$/, ''));
+      refs.filter((n) => n.startsWith('WKND_TARGET_')).forEach((n) => expect(TARGET_INPUTS).toContain(n));
+      const r = checkDeployEnv({ manifestTexts: manifests, env: COMPLETE });
+      expect(r).toMatchObject({ ok: true, targetDiagnostic: false });
+      expect(r.warnings.join('\n')).not.toContain('WKND_TARGET_');
+    });
+
+    test('the action inputs never include promotion, delegation, Brevo or commerce secrets', () => {
+      expect(Object.keys(action().inputs).filter((k) => /PROMOTION|RECOVERY|DELEGATION|BREVO|MCP_/.test(k))).toEqual([]);
+    });
+
+    test.each([
+      'WKND_TARGET_DIAG_ENABLED', 'WKND_TARGET_ID_LINKAGE_ENABLED', 'WKND_TARGET_ID_BINDING_STORE_APPROVED', 'WKND_TARGET_ID_SERVICE_ENABLED',
+    ])('%s=true outside a -stage namespace refuses the deploy (names only)', (flag) => {
+      const env = {
+        ...COMPLETE, AIO_runtime_namespace: '28538-wkndcommerce', WKND_TARGET_DIAG_ENVIRONMENT: 'stage', [flag]: 'true',
+      };
+      const r = checkDeployEnv({ manifestTexts: manifests, env });
+      expect(r.ok).toBe(false);
+      expect(r.errors.join('\n')).toContain(`${flag} may only be true in a -stage namespace`);
+    });
+
+    test('flags accept only true, false or empty; enabling requires the stage environment', () => {
+      expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_ID_SERVICE_ENABLED: 'yes' } }).ok).toBe(false);
+      expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'true' } }).errors.join())
+        .toContain('requires WKND_TARGET_DIAG_ENVIRONMENT=stage');
+      const on = checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'true', WKND_TARGET_DIAG_ENVIRONMENT: 'stage' } });
+      expect(on).toMatchObject({ ok: true, targetDiagnostic: true });
+      expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'false' } }).ok).toBe(true);
     });
   });
 

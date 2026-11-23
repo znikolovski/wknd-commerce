@@ -1,9 +1,14 @@
-# Target AAM diagnostic (Stage only) — offline preparation
+# Target AAM diagnostic (Stage only) — inert runtime integration
 
-Status: **offline preparation only**. `lib/target-diagnostic.js` and its tests exist; there is no action,
-manifest entry, configuration or deployment. Nothing calls Target, Audience Manager or Edge from this
-code until the coordinator confirms the activity, client code, property token and manifest, and a Stage
-deploy is approved. Production is refused by configuration (environment and namespace).
+Status: **implemented, inert, OFF by default. Not deployed.**
+- `actions/target-diagnostic` (manifest entry, deploy gate), `lib/target-diagnostic-action.js`,
+  `lib/target-diagnostic.js`, `lib/target-id-binding.js`, `lib/target-binding-store.js` and
+  `lib/id-linkage-consent.js` exist, with offline tests.
+- With the manifest defaults (every `WKND_TARGET_*` empty), the action answers 404 and touches
+  nothing.
+- Nothing calls Target, Audience Manager or the ID Service until the live acceptance gates below are
+  approved and their flags are set for a Stage deploy.
+- Production is refused at deploy time and at runtime (environment and namespace).
 
 ## What it asks and what the answer means
 
@@ -38,7 +43,7 @@ A decision is **not** audience evidence:
 - The default provider is `unavailableBindingProvider`, so the result is `unavailable` /
   `no-trusted-binding` until a supported issuance path is verified.
 
-## Trusted ECID binding: feasibility (not verified, not implemented)
+## Trusted ECID binding: feasibility (implemented inert; not live-verified)
 
 Target's server-side Audience Manager integration requires **all three** of these
 ([Target: AAM segments](https://experienceleague.adobe.com/en/docs/target-dev/developer/server-side/integration/aam-segments)):
@@ -72,16 +77,102 @@ Open points for candidate A (each one blocks a Stage call):
 5. **Isolation.** The ECID binding must be per environment and per shopper. Logout, account switch
    and withdrawal must invalidate the stored binding.
 
-## Binding provider lifecycle (offline): `lib/target-id-binding.js`
+## Runtime integration (inert): `actions/target-diagnostic`
 
-`createIdServiceBindingProvider({ orgId, dpid, consent, store })` implements candidate A as an offline
-design. Nothing wires it: there is no store collection, consent source, configuration, manifest entry or
-call site, and the diagnostic's default provider is still `unavailableBindingProvider`.
+A raw web action in the `commerce` package (`app.config.yaml`, `final` inputs). Logic lives in
+`lib/target-diagnostic-action.js`. Every gate is server configuration from the manifest; callers cannot
+set or override any of it (raw body, no query merge, `final`). The Runtime namespace comes from the
+platform environment, never from a parameter. **Every `WKND_TARGET_*` input is optional and deploys
+empty, which means OFF.**
+
+| Request (POST, `Authorization: Bearer <Auth0 access token>`) | Result |
+|---|---|
+| `{ op:'consent-status' }` | `{ status:'ok', consent: granted\|withdrawn\|absent\|unknown }` |
+| `{ op:'consent', optIn:true, wordingVersion, source? }` | Explicit first-party grant: `{ status:'ok', consent, changed }` |
+| `{ op:'consent', optIn:false, source? }` | Withdrawal, always allowed once the base gate passes |
+| `{ op:'decide' }` | The inert diagnostic result: a marker or `unavailable` with a category. `evidence:false`, `financialAuthorization:false` |
+
+**Gate order.** Each gate fails closed, and a refusal touches nothing.
+
+| # | Gate | Refusal | Never called on refusal |
+|---|---|---|---|
+| 1 | `TARGET_DIAG_ENABLED=true`, `TARGET_DIAG_ENVIRONMENT=stage`, a `-stage` namespace, Auth0 issuer/audience, a non-empty allowlist | 404 `disabled` / `not-stage` / `not-configured`, with no CORS headers | Auth0, store, ID Service, Target |
+| 2 | No `X-WKND-Delegation` header. Delegated agents never grant. | 403 `delegated-not-allowed` | Auth0, store |
+| 3 | A valid Auth0 RS256 token (`lib/auth.js` `verifyToken`) | 401 `unauthenticated` | store |
+| 4 | `shopperKey(AUTH0_ISSUER, sub)` is allowlisted | 403 `not-allowlisted` | store |
+| 5 | A strict JSON body containing only that op's fields | 400 `invalid-request` | store |
+| 6 | Grant: `TARGET_ID_LINKAGE_ENABLED=true` and the wording in `TARGET_ID_LINKAGE_WORDING_VERSIONS` | 403 `linkage-disabled` / `wording-not-approved` | store |
+| 7 | Decide: linkage enabled, `TARGET_ID_BINDING_STORE_APPROVED=true`, `TARGET_ID_SERVICE_ENABLED=true`, org, DPID, bounded `TARGET_ID_TIMEOUT_MS` / `TARGET_ID_LEASE_MS` / `TARGET_DIAG_TIMEOUT_MS`, Target client and property | 503 `not-approved` with the gate's **name** | store, ID Service, Target |
+
+- **Deploy gate** (`lib/deploy-env.js`, the pre-app-deploy hook):
+  - every `WKND_TARGET_*` input is optional;
+  - each flag must be `true`, `false` or empty;
+  - any flag set to `true` outside a `-stage` namespace, or the diagnostic enabled without
+    `WKND_TARGET_DIAG_ENVIRONMENT=stage`, refuses the deploy.
+- **Package inputs.** Like every action in the `commerce` package, this one inherits the package-level
+  inputs (`HLX_*`, `AEM_*` and so on). It never reads them: `CONFIG_KEYS` is an explicit allowlist.
+- **Responses and logs** carry fixed categories only: op, HTTP status, status, reason,
+  `bindingReason`, gate name, and the error name/code for unexpected failures. They never carry
+  tokens, `sub`, shopper keys, ECIDs or blobs. There is no silent success fallback: an unexpected
+  error is a 500 `internal`.
+- **Isolation.** Promotions, cart, orders, `shopper-audiences` and the GraphQL schema are untouched,
+  and no Mesh change is needed.
+
+### ID-linkage consent purpose (`lib/id-linkage-consent.js`)
+
+- **Separate and optional.**
+  - It is not one of the email `CONSENT_PURPOSES`, and email opt-ins never imply it.
+  - It is stored atomically in one `updateOne` on the customer document:
+    `idLinkage: { state, grantId, source, wordingVersion, updatedAt }`.
+  - `grantId` is a server-issued UUID per grant and serves as the **generation token**.
+- **Granting** needs all of the following:
+  - a verified Auth0 `sub` that is not delegated;
+  - source `account-settings` or `ios`;
+  - an approved wording version (none is approved by default);
+  - an existing customer record, created by a website sign-in.
+
+  Granting again while granted keeps the same grant, so there is no ECID churn. A grant whose
+  `marketing_consent_events` evidence cannot be written is reverted (fail closed).
+- **Withdrawal** is always allowed.
+  - It writes the state first, then removes every binding for `sha256(sub)`, then appends the evidence.
+  - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) withdraws an existing grant
+    the same way and **can never grant**. With no grant it is a read-only query; it writes nothing
+    and never touches the binding collection.
+  - Withdrawing an email purpose (`setMarketingConsent(false)`) does **not** withdraw linkage, because
+    the purposes are separate.
+- **Consent source.** `createIdLinkageConsentSource(store, { issuer })` maps the customer document to
+  granted / withdrawn / absent / unknown. A shopper key that does not derive from the verified `sub`
+  is unknown.
+
+### Timing windows (consent generation)
+
+| Window | Guard | Test |
+|---|---|---|
+| Withdrawal before the issuance claim | Pre-claim consent check | provider: consent withdrawn |
+| Between the first check and the claim | Post-claim authoritative check | provider: post-claim check |
+| During the ID Service call | Withdrawal removes the claim (it carries `subject`); the final `put(ifMatch: claim)` fails with `cas-conflict` | id-linkage: in-flight withdrawal |
+| After `resolve`, before the Target request | `confirm()` (same `grantId`) immediately before sending. If it fails, nothing is sent. | diagnostic: before the Target request |
+| During the Target request | `confirm()` again before returning. A withdrawal or reconsent gives `consent-changed` with no marker. | diagnostic and action: during the Target request |
+
+A request that has already reached Adobe (ID Service or Target) **cannot be recalled**. The ECID ↔
+declared-ID link that was already transmitted is not deleted by local withdrawal (see the live gates
+below).
+
+## Binding provider lifecycle: `lib/target-id-binding.js`
+
+`createIdServiceBindingProvider({ orgId, dpid, consent, store })` implements candidate A. It is wired
+only by `actions/target-diagnostic` for `op:'decide'` after every decide gate passes. The adapter's
+default provider is still `unavailableBindingProvider`.
+- `resolve` returns a binding with its `consentGrantId`, or `{ source:'unavailable', reason }`, where
+  the reason comes from `BINDING_REASONS` and never carries identifiers.
+- `confirm()` re-checks the same grant.
 
 - **Request:** `GET https://dpm.demdex.net/id?d_orgid=…&d_ver=2[&d_mid=<stored ECID>]&d_cid=<DPID>%01<verified sub>%011`.
   - No traits, `d_cb`, headers, cookies, browser identifiers or caller input.
   - `redirect:'error'`, `credentials:'omit'`, with a timeout.
-- **Response:** `d_mid` must be 38 digits, `dcs_region` an integer ≥ 1, and `d_blob` non-empty and at
+- **Response:** documented wire types only. `d_mid` must be a 38-digit string. `dcs_region` and `id_sync_ttl`
+  must be JSON integers or decimal digit strings; booleans, arrays, floats, signs and exponents are
+  rejected. `dcs_region` must be ≥ 1, and `d_blob` non-empty and at
   most **512 bytes**. 512 is the ID Service's own documented limit; the Target adapter keeps the
   Delivery API's 1024-byte limit.
 - **`id_sync_ttl`** is the documented re-synchronization interval, **not** membership expiry. It sets
@@ -90,7 +181,7 @@ call site, and the diagnostic's default provider is still `unavailableBindingPro
   (`get`/`put`/`remove`), and a lease of at least two ID Service timeouts. The legacy boolean
   `consent.allowed()` is not accepted.
 
-### Consent provider interface (authoritative source not chosen)
+### Consent provider interface (implemented by `lib/id-linkage-consent.js`)
 
 `consent.lookup({ shopperKey, sub })` must return one of:
 
@@ -104,7 +195,7 @@ call site, and the diagnostic's default provider is still `unavailableBindingPro
 Unknown never removes, because an outage is not a withdrawal and removal would cause ECID churn.
 Unknown never issues either, so a withdrawal during an outage is still honoured.
 
-None of the existing consent purposes may back this interface. `marketing.recoveryEmail` and
+Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEmail` and
 `marketing.audienceEmail` are email purposes, and consent is never bundled or inferred
 (docs/PROMOTIONS.md).
 
@@ -137,7 +228,7 @@ None of the existing consent purposes may back this interface. `marketing.recove
   until its `exp`. `lib/auth.js` requires `exp`, and logout does not revoke the token. A leftover
   token reveals only an inert marker.
 
-### Store CAS contract and cold start (no collection approved)
+### Store CAS contract and cold start (`lib/target-binding-store.js`; live collection not approved)
 
 - `get(key)` returns `{ etag, record }` or `null`.
 - `put(key, record, { ifMatch })` returns the new etag, or `null` if the precondition fails.
@@ -145,7 +236,7 @@ None of the existing consent purposes may back this interface. `marketing.recove
 - `remove(key, { ifMatch? })` removes conditionally; without `ifMatch` it is unconditional.
 - **Etags are opaque and never reused for a key, even after a removal.** Random UUIDs qualify; a
   counter that restarts after a delete does not, because a stale holder's write could then match.
-- Possible mapping to the existing store pattern (`lib/cart.js` CAS):
+- Implemented on the existing store pattern (the same primitives as the `lib/cart.js` CAS):
   - create-if-absent: `insertOne`, with a duplicate-key error meaning `null`;
   - conditional update: `updateOne({_id, etag}, {$set})` succeeding only when `matchedCount === 1`;
   - removal: `deleteOne({_id[, etag]})`.
@@ -158,31 +249,49 @@ None of the existing consent purposes may back this interface. `marketing.recove
   a warm one. An empty or lost store is indistinguishable from a first issuance and mints a new ECID.
   Data loss therefore causes churn but is never reused across shoppers.
 
-### Implementation gaps (all block any live call)
+### Code done vs. live acceptance gates
 
-1. **Consent source.** There is no ID-linkage consent purpose. It needs:
-   - purpose, wording and source;
-   - a stable `grantId` (for example the opt-in `marketing_consent_events.id`). The profile write and
-     the event append are currently not atomic, and the profile does not store the event ID;
-   - an explicit decision on whether a Brevo unsubscribe (`recordSuppression`, which withdraws **every**
-     `CONSENT_PURPOSES` entry) withdraws ID linkage;
-   - confirmation that delegated agents cannot grant it.
-2. **Withdrawal / erasure push.** `setMarketingConsent(false)`, the Brevo unsubscribe and any account
-   erasure must call `invalidate()` after flipping consent. There are no call sites, and the repository
-   has no erasure flow.
-3. **Adobe-side linkage.** Local invalidation stops future use, but does **not** remove the
-   ECID↔declared-ID link already held by Audience Manager. That needs a Privacy Service or AAM
-   deletion path, which is not designed.
-4. **Store.** A diagnostic-only collection and the mapping above need approval, plus a check of CAS
-   semantics on the real `lib/store.js` backend.
-5. **Adobe behaviour (from the open points above):**
-   - side effects of the `d_cid` call (DCS event, profile linking);
-   - the merge rule for a server-minted ECID;
-   - the effect of the server IP on `dcs_region`;
-   - `d_blob` freshness between resyncs (the blob is not membership).
-6. **Tuning.** The lease (10s) and timeout (2s) defaults are unmeasured.
+**Implemented and tested offline (this PR):**
 
-None of these are implemented here. The provider remains unconfigured by default.
+- the consent purpose;
+- the authoritative consent source;
+- the CAS binding-store adapter;
+- withdrawal call sites (shopper withdrawal and Brevo unsubscribe), with binding removal;
+- the Stage-only action and manifest entry;
+- the deploy gate;
+- strict wire parsing;
+- categorized errors;
+- the consent re-checks before sending and before exposing a result.
+
+**Live acceptance gates.** These need approval or evidence, not code; each blocks enabling a flag.
+
+1. **Wording / legal.** Approve the ID-linkage consent wording and add its version to
+   `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. The storefront UI for the grant is not built; it would
+   call `op:'consent'` with the shopper's Auth0 token.
+2. **Backend CAS.** Approve the `target_id_bindings` collection, then verify on Stage App Builder
+   Database Storage that:
+   - a duplicate `_id` insert fails;
+   - `updateOne({_id, etag})` reports `matchedCount` 0 or 1;
+   - `deleteOne` / `deleteMany` behave as expected;
+   - a missing collection is a not-found error.
+
+   Then set `WKND_TARGET_ID_BINDING_STORE_APPROVED`.
+3. **Adobe ID Service call** (`WKND_TARGET_ID_SERVICE_ENABLED`):
+   - `d_cid` with authenticated state 1 **transmits the authenticated DPUID to DCS**. Its side effects
+     (DCS event, device-to-profile linking) must be accepted.
+   - The effect of the server IP on `dcs_region` is unknown.
+   - `d_blob` freshness between resyncs is unknown (the blob is not membership).
+4. **Merge rule.** The pilot rule 1547344 is Current Authenticated + No Device, which is evaluated **in
+   real time only**. There is no assurance that a server-minted ECID is ever evaluated under it. This
+   must be proven by a live experiment, not inferred from daily reports or API permissions.
+5. **Upstream deletion.** Removing a binding locally does not delete the link Audience Manager already
+   holds. A Privacy Service or AAM deletion path is needed before personal data is linked.
+6. **Live qualification acceptance.** Activating activity 689010 and reading a real decision are
+   separate approvals. A decision is never evidence, and report absence is never negative.
+7. **Tuning.** The lease (default 10s) and timeouts (default 2s) are bounded configuration, not SLAs;
+   measure them on Stage.
+
+There is no account erasure flow in the repository, and this PR does not invent one.
 
 ## Reading Audience Manager reports (latency, not evidence)
 
@@ -226,8 +335,6 @@ These are Adobe's general guidelines, not SLAs.
   - The numeric workspace IDs differ (property 864785625, activity 26132544), which may be legacy or
     product-profile IDs. The token association itself is verified.
   - Activation is not approved.
-- Binding candidate A is verified, and the implementation gaps above are closed and approved (consent purpose, withdrawal push, Adobe-side deletion, store).
-- Manifest entry: a Stage-only raw web action that verifies the Auth0 token with `lib/auth.js` and
-  passes only claims. The deploy check must refuse a Production namespace when the diagnostic is
-  enabled. This needs explicit approval.
+- Every live acceptance gate above is approved, and its flag is set only in the Stage `.env`.
+- A Stage deploy of the existing manifest entry is explicitly approved.
 - No Production deployment, customer/cart/order writes, emails or financial coupling.

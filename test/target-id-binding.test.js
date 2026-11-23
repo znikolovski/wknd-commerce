@@ -66,6 +66,8 @@ function provider(over = {}) {
   };
 }
 const resolveA = (p) => p.resolve({ shopperKey: KEY, sub: SUB });
+const un = (reason) => ({ source: 'unavailable', reason });
+const SUBJECT = crypto.createHash('sha256').update(SUB, 'utf8').digest('hex');
 
 describe('ID Service request (documented direct integration)', () => {
   test('sends only org, version, optional stored ECID and the declared authenticated ID', () => {
@@ -91,6 +93,25 @@ describe('ID Service request (documented direct integration)', () => {
     expect(parseIdServiceResponse(idResponse(over))).toBeNull();
   });
 
+  test.each([
+    ['a numeric d_mid (precision loss)', { d_mid: 1e37 }],
+    ['a boolean region', { dcs_region: true }],
+    ['an array region', { dcs_region: [9] }],
+    ['a fractional region', { dcs_region: 9.5 }],
+    ['a signed region string', { dcs_region: '+9' }],
+    ['an exponent region string', { dcs_region: '9e0' }],
+    ['an array body', null],
+  ])('documented wire types only: %s is rejected', (_, over) => {
+    expect(parseIdServiceResponse(over ? idResponse(over) : [idResponse()])).toBeNull();
+  });
+
+  test('integer and decimal-string region/TTL are both accepted; coercible TTL junk means no reuse', () => {
+    expect(parseIdServiceResponse(idResponse({ dcs_region: 9, id_sync_ttl: 604800 }))).toMatchObject({ locationHint: 9, ttlS: 604800 });
+    expect(parseIdServiceResponse(idResponse({ id_sync_ttl: true })).ttlS).toBe(0);
+    expect(parseIdServiceResponse(idResponse({ id_sync_ttl: [604800] })).ttlS).toBe(0);
+    expect(parseIdServiceResponse(idResponse({ id_sync_ttl: '6.048e5' })).ttlS).toBe(0);
+  });
+
   test('id_sync_ttl is a resync interval; missing or absurd values mean "do not reuse"', () => {
     expect(parseIdServiceResponse(idResponse()).ttlS).toBe(604800);
     expect(parseIdServiceResponse(idResponse({ id_sync_ttl: undefined })).ttlS).toBe(0);
@@ -107,13 +128,15 @@ describe('configuration: no default consent source or store', () => {
     ['bad org', { orgId: 'nope' }],
     ['bad DPID', { dpid: 'x' }],
     ['lease shorter than two ID Service timeouts', { leaseMs: 3000, timeoutMs: 2000 }],
+    ['timeout out of bounds', { timeoutMs: 60000, leaseMs: 60000 }],
+    ['lease out of bounds', { leaseMs: 600000 }],
   ])('%s: unconfigured and issues nothing', async (_, deps) => {
     const fetchImpl = fetchJson(idResponse());
     const p = createIdServiceBindingProvider({
       orgId: ORG, dpid: DPID, consent: consentSource(), store: memoryStore(), fetchImpl, ...deps,
     });
     expect(p.configured).toBe(false);
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('unconfigured'));
     expect(await p.invalidate(KEY)).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -123,7 +146,7 @@ describe('issuance, reuse and resync', () => {
   test('cold start (no record): one cookieless call without d_mid, bound to shopper + consent grant', async () => {
     const { p, store, fetchImpl } = provider();
     expect(await resolveA(p)).toEqual({
-      source: 'server-issued', ecid: ECID_A, locationHint: 9, blob: 'issued-blob',
+      source: 'server-issued', ecid: ECID_A, locationHint: 9, blob: 'issued-blob', consentGrantId: 'consent-evt-1',
     });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
     expect(dMid(fetchImpl)).toBeNull();
@@ -133,6 +156,7 @@ describe('issuance, reuse and resync', () => {
     expect(store.record(KEY)).toEqual({
       state: 'bound',
       shopperKey: KEY,
+      subject: SUBJECT,
       consentGrantId: 'consent-evt-1',
       ecid: ECID_A,
       locationHint: 9,
@@ -156,7 +180,7 @@ describe('issuance, reuse and resync', () => {
     const store = memoryStore();
     await resolveA(provider({ store }).p);
     const bad = provider({ store, clock: T0 + TTL_MS, fetchImpl: fetchJson(idResponse({ d_mid: ECID_B })) });
-    expect(await resolveA(bad.p)).toBeNull();
+    expect(await resolveA(bad.p)).toEqual(un('id-service-invalid'));
     expect(dMid(bad.fetchImpl)).toBe(ECID_A);
     expect(store.record(KEY)).toMatchObject({ state: 'issuing', priorEcid: ECID_A });
     const ok = provider({
@@ -175,12 +199,13 @@ describe('issuance, reuse and resync', () => {
   });
 
   test.each([
-    ['HTTP error', fetchJson({}, 503)],
-    ['network failure', jest.fn(async () => { throw new Error('offline'); })],
-    ['invalid body', fetchJson({ d_mid: 'x' })],
-  ])('ID Service %s: unavailable, nothing bound (lease lapses)', async (_, fetchImpl) => {
+    ['HTTP error', fetchJson({}, 503), 'id-service-error'],
+    ['network failure', jest.fn(async () => { throw new Error('offline'); }), 'id-service-unreachable'],
+    ['invalid body', fetchJson({ d_mid: 'x' }), 'id-service-invalid'],
+    ['unparseable body', jest.fn(async () => ({ ok: true, json: async () => { throw new SyntaxError('x'); } })), 'id-service-invalid'],
+  ])('ID Service %s: categorized unavailable, nothing bound (lease lapses)', async (_, fetchImpl, reason) => {
     const { p, store } = provider({ fetchImpl });
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un(reason));
     expect(store.record(KEY)).toMatchObject({ state: 'issuing', priorEcid: null });
   });
 });
@@ -198,14 +223,14 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
   ])('consent %s removes the binding and calls nothing', async (_, answer) => {
     const store = await bound();
     const { p, fetchImpl } = provider({ store, consent: consentSource(answer) });
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un(answer.state === 'withdrawn' ? 'consent-withdrawn' : 'consent-absent'));
     expect(store.data.has(KEY)).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   test('missing consent with no record writes nothing', async () => {
     const { p, store } = provider({ consent: consentSource({ state: 'absent' }) });
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('consent-absent'));
     expect(store.put).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
   });
@@ -222,7 +247,7 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
     const { p, fetchImpl } = provider({ store, consent: consentSource(answer) });
     store.put.mockClear();
     store.remove.mockClear();
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('consent-unknown'));
     expect(store.data.get(KEY)).toEqual(before);
     expect(store.put).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
@@ -251,14 +276,14 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
       return { ok: true, json: async () => idResponse() };
     });
     ({ p } = provider({ store, consent, fetchImpl }));
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('cas-conflict'));
     expect(store.data.has(KEY)).toBe(false);
   });
 
   test('withdrawal between the first check and the claim is caught by the post-claim check', async () => {
     const answers = [GRANTED, { state: 'withdrawn' }];
     const { p, store, fetchImpl } = provider({ consent: consentSource(() => answers.shift()) });
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('consent-changed'));
     expect(store.data.has(KEY)).toBe(false);
     expect(fetchImpl).not.toHaveBeenCalled();
   });
@@ -272,12 +297,31 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
   });
 });
 
+describe('confirm(): authoritative re-check for the issued grant', () => {
+  test('true only while the same grant is current', async () => {
+    const consent = consentSource();
+    const { p } = provider({ consent });
+    const binding = await resolveA(p);
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(true);
+    consent.answer = { state: 'granted', grantId: 'consent-evt-2' };
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+    consent.answer = { state: 'withdrawn' };
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+    consent.answer = () => { throw new Error('down'); };
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+    consent.answer = GRANTED;
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding: { ...binding, consentGrantId: undefined } })).toBe(false);
+    expect(await p.confirm({ shopperKey: KEY, sub: '', binding })).toBe(false);
+  });
+});
+
 describe('concurrency and storage CAS', () => {
   test('concurrent cold-start resolves mint at most one ECID', async () => {
     const { p, store, fetchImpl } = provider();
     const results = await Promise.all([resolveA(p), resolveA(p)]);
     expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.filter((r) => r.source === 'server-issued')).toHaveLength(1);
+    expect(results.filter((r) => r.source === 'unavailable').map((r) => r.reason)).toEqual(expect.arrayContaining([expect.stringMatching(/^(cas-conflict|issuing-in-progress)$/)]));
     expect(store.record(KEY).ecid).toBe(ECID_A);
   });
 
@@ -288,7 +332,8 @@ describe('concurrency and storage CAS', () => {
     const results = await Promise.all([resolveA(later.p), resolveA(later.p)]);
     expect(later.fetchImpl).toHaveBeenCalledTimes(1);
     expect(dMid(later.fetchImpl)).toBe(ECID_A);
-    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.filter((r) => r.source === 'server-issued')).toHaveLength(1);
+    expect(results.filter((r) => r.source === 'unavailable').map((r) => r.reason)).toEqual(expect.arrayContaining([expect.stringMatching(/^(cas-conflict|issuing-in-progress)$/)]));
   });
 
   test('a live issuing lease is not pre-empted; a lapsed one is taken over with the prior ECID', async () => {
@@ -296,7 +341,7 @@ describe('concurrency and storage CAS', () => {
     await resolveA(provider({ store }).p);
     await resolveA(provider({ store, clock: T0 + TTL_MS, fetchImpl: fetchJson({}, 503) }).p);
     const during = provider({ store, clock: T0 + TTL_MS + DEFAULT_LEASE_MS - 1 });
-    expect(await resolveA(during.p)).toBeNull();
+    expect(await resolveA(during.p)).toEqual(un('issuing-in-progress'));
     expect(during.fetchImpl).not.toHaveBeenCalled();
     const after = provider({ store, clock: T0 + TTL_MS + DEFAULT_LEASE_MS });
     expect((await resolveA(after.p)).ecid).toBe(ECID_A);
@@ -313,7 +358,7 @@ describe('concurrency and storage CAS', () => {
     const fresh = provider({ store, clock: T0 + DEFAULT_LEASE_MS, fetchImpl: fetchJson(idResponse({ d_mid: ECID_B })) });
     expect((await resolveA(fresh.p)).ecid).toBe(ECID_B);
     release({ ok: true, json: async () => idResponse() });
-    expect(await pending).toBeNull();
+    expect(await pending).toEqual(un('cas-conflict'));
     expect(store.record(KEY).ecid).toBe(ECID_B);
   });
 
@@ -323,7 +368,7 @@ describe('concurrency and storage CAS', () => {
     const store = memoryStore();
     store[method].mockRejectedValueOnce(new Error('db down'));
     const { p, fetchImpl } = provider({ store });
-    expect(await resolveA(p)).toBeNull();
+    expect(await resolveA(p)).toEqual(un('store-error'));
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 });
@@ -344,7 +389,7 @@ describe('account isolation, logout and caller input', () => {
     store.data.set(OTHER_KEY, structuredClone(store.data.get(KEY)));
     const before = structuredClone(store.data.get(OTHER_KEY));
     const other = provider({ store });
-    expect(await other.p.resolve({ shopperKey: OTHER_KEY, sub: OTHER_SUB })).toBeNull();
+    expect(await other.p.resolve({ shopperKey: OTHER_KEY, sub: OTHER_SUB })).toEqual(un('foreign-record'));
     expect(other.fetchImpl).not.toHaveBeenCalled();
     expect(other.consent.lookup).not.toHaveBeenCalled();
     expect(store.data.get(OTHER_KEY)).toEqual(before);
@@ -352,9 +397,9 @@ describe('account isolation, logout and caller input', () => {
 
   test('an unverified or missing sub never reaches consent, the store or the ID Service', async () => {
     const { p, fetchImpl, store, consent } = provider();
-    expect(await p.resolve({ shopperKey: KEY, sub: '' })).toBeNull();
-    expect(await p.resolve({ shopperKey: '', sub: SUB })).toBeNull();
-    expect(await p.resolve()).toBeNull();
+    expect(await p.resolve({ shopperKey: KEY, sub: '' })).toEqual(un('invalid-input'));
+    expect(await p.resolve({ shopperKey: '', sub: SUB })).toEqual(un('invalid-input'));
+    expect(await p.resolve()).toEqual(un('invalid-input'));
     expect(fetchImpl).not.toHaveBeenCalled();
     expect(store.get).not.toHaveBeenCalled();
     expect(consent.lookup).not.toHaveBeenCalled();

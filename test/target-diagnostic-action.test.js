@@ -1,0 +1,365 @@
+/**
+ * actions/target-diagnostic handler: gates, identity, consent ops and the inert decide flow. Offline:
+ * memory store, injected fetch (ID Service + Target), real Auth0 RS256 verification against a local JWKS.
+ */
+const { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } = require('jose');
+const { createMemoryStore } = require('../lib/store');
+const { shopperKey } = require('../lib/recovery-policy');
+const { verifyToken } = require('../lib/auth');
+const { BINDING_COLLECTION } = require('../lib/target-binding-store');
+const { MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
+const { createTargetDiagnosticHandler, CONFIG_KEYS } = require('../lib/target-diagnostic-action');
+
+const ISSUER = 'https://example.auth0.com/';
+const AUDIENCE = 'https://api.wknd.example';
+const SUB = 'auth0|pilot-shopper';
+const OTHER_SUB = 'auth0|other-shopper';
+const KEY = shopperKey(ISSUER, SUB);
+const STAGE_NS = '00000-example-stage';
+const ECID = '1'.repeat(38);
+const BLOB = 'issued-blob-value';
+const T0 = Date.UTC(2026, 10, 23);
+
+const BASE = {
+  AUTH0_ISSUER: ISSUER,
+  AUTH0_AUDIENCE: AUDIENCE,
+  TARGET_DIAG_ENABLED: 'true',
+  TARGET_DIAG_ENVIRONMENT: 'stage',
+  TARGET_DIAG_SHOPPER_KEYS: KEY,
+  TARGET_DIAG_ALLOWED_ORIGINS: 'https://stage.wknd.example',
+};
+const LIVE = {
+  ...BASE,
+  TARGET_CLIENT_CODE: 'exampleclient',
+  TARGET_PROPERTY_TOKEN: '11111111-2222-4333-8444-555555555555',
+  TARGET_ID_LINKAGE_ENABLED: 'true',
+  TARGET_ID_LINKAGE_WORDING_VERSIONS: 'idl-2026-11',
+  TARGET_ID_BINDING_STORE_APPROVED: 'true',
+  TARGET_ID_SERVICE_ENABLED: 'true',
+  TARGET_ID_ORG_ID: '28260E2056581D3B7F000101@AdobeOrg',
+  TARGET_ID_DPID: '1547309',
+};
+
+let privateKey;
+let jwks;
+beforeAll(async () => {
+  const pair = await generateKeyPair('RS256');
+  privateKey = pair.privateKey;
+  jwks = createLocalJWKSet({ keys: [{ ...(await exportJWK(pair.publicKey)), kid: 'k1', alg: 'RS256' }] });
+});
+const auth0Token = (sub = SUB, over = {}) => new SignJWT({ ...over })
+  .setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setSubject(sub).setIssuer(ISSUER).setAudience(AUDIENCE)
+  .setIssuedAt().setExpirationTime('5m')
+  .sign(privateKey);
+
+const offerBody = (marker) => ({
+  execute: {
+    mboxes: [{
+      name: MBOX,
+      options: [{
+        type: 'json',
+        content: {
+          schema: REQUEST_SCHEMA, environment: 'stage', marker, financialAuthorization: false,
+        },
+      }],
+    }],
+  },
+});
+
+function harness({
+  config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget,
+} = {}) {
+  const lines = [];
+  const logger = { info: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
+  const fetchImpl = jest.fn(async (url) => {
+    if (String(url).startsWith('https://dpm.demdex.net/id')) {
+      return {
+        ok: true,
+        json: async () => ({
+          d_mid: ECID, dcs_region: '9', id_sync_ttl: '604800', d_blob: BLOB,
+        }),
+      };
+    }
+    if (onTarget) await onTarget(store);
+    return { ok: true, json: async () => offerBody('climbing-planner') };
+  });
+  const getStore = jest.fn(async () => store);
+  const verify = jest.fn((token, cfg) => verifyToken(token, cfg, { jwks }));
+  const handle = createTargetDiagnosticHandler({
+    getStore, verify, fetchImpl, logger, namespace: () => ns, now: () => T0,
+  });
+  const call = async (body, { token, headers = {}, method = 'post', extra = {} } = {}) => handle({
+    ...config,
+    ...extra,
+    __ow_method: method,
+    __ow_headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), origin: 'https://stage.wknd.example', ...headers },
+    ...(body === undefined ? {} : { __ow_body: Buffer.from(JSON.stringify(body)).toString('base64') }),
+  });
+  return {
+    call, store, fetchImpl, getStore, verify, lines,
+  };
+}
+async function seedCustomer(store, sub = SUB) {
+  await store.collection('customers').insertOne({
+    _id: sub, sub, id: sub, email: `${sub.replace(/\W/g, '')}@example.com`,
+  });
+}
+const expectUntouched = (h) => {
+  expect(h.getStore).not.toHaveBeenCalled();
+  expect(h.fetchImpl).not.toHaveBeenCalled();
+};
+
+describe('disabled / unapproved configuration never touches storage, Auth0, the ID Service or Target', () => {
+  test.each([
+    ['default (nothing configured)', {}, STAGE_NS, 'disabled'],
+    ['enabled flag not exactly "true"', { ...LIVE, TARGET_DIAG_ENABLED: 'TRUE' }, STAGE_NS, 'disabled'],
+    ['Production environment', { ...LIVE, TARGET_DIAG_ENVIRONMENT: 'production' }, STAGE_NS, 'not-stage'],
+    ['Production namespace', LIVE, '28538-wkndcommerce', 'not-stage'],
+    ['no namespace', LIVE, '', 'not-stage'],
+    ['empty allowlist', { ...LIVE, TARGET_DIAG_SHOPPER_KEYS: '' }, STAGE_NS, 'not-configured'],
+    ['no Auth0 audience', { ...LIVE, AUTH0_AUDIENCE: '' }, STAGE_NS, 'not-configured'],
+  ])('%s → 404, nothing touched', async (_, config, ns, reason) => {
+    const h = harness({ config, ns });
+    const r = await h.call({ op: 'decide' }, { token: await auth0Token() });
+    expect(r).toMatchObject({ statusCode: 404, body: { status: 'unavailable', reason } });
+    expect(r.headers['Access-Control-Allow-Origin']).toBeUndefined();
+    expectUntouched(h);
+    expect(h.verify).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    ['linkage off', { TARGET_ID_LINKAGE_ENABLED: '' }, 'TARGET_ID_LINKAGE_ENABLED'],
+    ['binding store not approved', { TARGET_ID_BINDING_STORE_APPROVED: 'false' }, 'TARGET_ID_BINDING_STORE_APPROVED'],
+    ['ID Service calls not approved', { TARGET_ID_SERVICE_ENABLED: '' }, 'TARGET_ID_SERVICE_ENABLED'],
+    ['bad org', { TARGET_ID_ORG_ID: 'org' }, 'TARGET_ID_ORG_ID'],
+    ['bad DPID', { TARGET_ID_DPID: 'x' }, 'TARGET_ID_DPID'],
+    ['unbounded ID timeout', { TARGET_ID_TIMEOUT_MS: '600000' }, 'TARGET_ID_TIMEOUT_MS'],
+    ['lease below two timeouts', { TARGET_ID_TIMEOUT_MS: '4000', TARGET_ID_LEASE_MS: '5000' }, 'TARGET_ID_LEASE_MS'],
+    ['non-numeric Target timeout', { TARGET_DIAG_TIMEOUT_MS: '2s' }, 'TARGET_DIAG_TIMEOUT_MS'],
+    ['no Target client', { TARGET_CLIENT_CODE: '' }, 'TARGET_CLIENT_CODE/TARGET_PROPERTY_TOKEN'],
+  ])('decide with %s → 503 not-approved naming the gate only, no store/network', async (_, change, gate) => {
+    const h = harness({ config: { ...LIVE, ...change } });
+    const r = await h.call({ op: 'decide' }, { token: await auth0Token() });
+    expect(r).toMatchObject({ statusCode: 503, body: { reason: 'not-approved', gate } });
+    expectUntouched(h);
+  });
+
+  test.each([
+    ['linkage off', { TARGET_ID_LINKAGE_ENABLED: 'false' }, 'linkage-disabled'],
+    ['no approved wording (legal gate)', { TARGET_ID_LINKAGE_WORDING_VERSIONS: '' }, 'wording-not-approved'],
+  ])('a grant with %s is refused before storage', async (_, change, reason) => {
+    const h = harness({ config: { ...LIVE, ...change } });
+    const r = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token: await auth0Token() });
+    expect(r).toMatchObject({ statusCode: 403, body: { reason } });
+    expectUntouched(h);
+  });
+});
+
+describe('identity: only verified, first-party, allowlisted shoppers; config is server-owned', () => {
+  test.each([
+    ['no token', {}],
+    ['a malformed bearer', { headers: { authorization: 'Bearer null' } }],
+  ])('%s → 401 without verification or storage', async (_, opts) => {
+    const h = harness();
+    expect((await h.call({ op: 'decide' }, opts)).statusCode).toBe(401);
+    expectUntouched(h);
+  });
+
+  test('a delegated agent request (LLM app) is refused before verification and can never grant', async () => {
+    const h = harness();
+    const r = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, {
+      token: await auth0Token(), headers: { 'X-WKND-Delegation': 'mcp' },
+    });
+    expect(r).toMatchObject({ statusCode: 403, body: { reason: 'delegated-not-allowed' } });
+    expect(h.verify).not.toHaveBeenCalled();
+    expectUntouched(h);
+  });
+
+  test.each([
+    ['an HS256 delegation-style assertion', async () => new SignJWT({ scope: 'shop:cart' })
+      .setProtectedHeader({ alg: 'HS256' }).setSubject(SUB).setIssuer(ISSUER).setAudience(AUDIENCE)
+      .setIssuedAt().setExpirationTime('1m')
+      .sign(new TextEncoder().encode('x'.repeat(32)))],
+    ['a token for another audience', async () => new SignJWT({})
+      .setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setSubject(SUB).setIssuer(ISSUER).setAudience('other')
+      .setIssuedAt().setExpirationTime('5m')
+      .sign(privateKey)],
+    ['an expired token', async () => new SignJWT({})
+      .setProtectedHeader({ alg: 'RS256', kid: 'k1' }).setSubject(SUB).setIssuer(ISSUER).setAudience(AUDIENCE)
+      .setIssuedAt(1).setExpirationTime(2)
+      .sign(privateKey)],
+  ])('%s fails real Auth0 verification → 401, no storage', async (_, mint) => {
+    const h = harness();
+    expect((await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token: await mint() })).statusCode).toBe(401);
+    expect(h.verify).toHaveBeenCalledTimes(1);
+    expectUntouched(h);
+  });
+
+  test('a verified but foreign (non-allowlisted) shopper → 403, no storage', async () => {
+    const h = harness();
+    const r = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token: await auth0Token(OTHER_SUB) });
+    expect(r).toMatchObject({ statusCode: 403, body: { reason: 'not-allowlisted' } });
+    expectUntouched(h);
+  });
+
+  test('caller-supplied configuration (query, body, namespace param) is never honoured', async () => {
+    const off = harness({ config: {} });
+    const viaQuery = await off.call({ op: 'decide' }, {
+      token: await auth0Token(),
+      extra: { __ow_query: 'TARGET_DIAG_ENABLED=true&TARGET_DIAG_ENVIRONMENT=stage', __OW_NAMESPACE: STAGE_NS },
+    });
+    expect(viaQuery.body.reason).toBe('disabled');
+    expectUntouched(off);
+    const prod = harness({ ns: '28538-wkndcommerce' });
+    expect((await prod.call({ op: 'decide' }, { token: await auth0Token(), extra: { __OW_NAMESPACE: STAGE_NS } })).body.reason).toBe('not-stage');
+    const h = harness();
+    const r = await h.call({ op: 'decide', TARGET_ID_SERVICE_ENABLED: 'true', ecid: ECID }, { token: await auth0Token() });
+    expect(r).toMatchObject({ statusCode: 400, body: { reason: 'invalid-request' } });
+    expectUntouched(h);
+    expect(CONFIG_KEYS).not.toContain('__OW_NAMESPACE');
+  });
+
+  test.each([
+    ['no body', undefined],
+    ['an unknown op', { op: 'grant-everything' }],
+    ['a non-boolean optIn', { op: 'consent', optIn: 'yes' }],
+  ])('%s → 400, no storage', async (_, body) => {
+    const h = harness();
+    expect((await h.call(body, { token: await auth0Token() })).statusCode).toBe(400);
+    expectUntouched(h);
+  });
+
+  test('a non-JSON body is a 400, never treated as {}', async () => {
+    const h = harness();
+    const r = await createTargetDiagnosticHandler({
+      getStore: h.getStore, verify: h.verify, fetchImpl: h.fetchImpl, namespace: () => STAGE_NS,
+    })({
+      ...LIVE, __ow_method: 'post', __ow_headers: { authorization: `Bearer ${await auth0Token()}` }, __ow_body: 'not json',
+    });
+    expect(r.statusCode).toBe(400);
+    expectUntouched(h);
+  });
+
+  test('CORS only for an exact configured origin; OPTIONS needs the base gate and touches nothing', async () => {
+    const h = harness({ config: { ...LIVE, TARGET_DIAG_ALLOWED_ORIGINS: '*,https://stage.wknd.example' } });
+    const pre = await h.call(undefined, { method: 'options' });
+    expect(pre.statusCode).toBe(204);
+    expect(pre.headers['Access-Control-Allow-Origin']).toBe('https://stage.wknd.example');
+    const evil = await h.call(undefined, { method: 'options', headers: { origin: 'https://evil.example' } });
+    expect(evil.headers['Access-Control-Allow-Origin']).toBeUndefined();
+    expect((await h.call(undefined, { method: 'get' })).statusCode).toBe(405);
+    expectUntouched(h);
+  });
+});
+
+describe('consent operations and the inert decide flow', () => {
+  test('grant → decide issues one binding and returns an inert marker with no identifiers', async () => {
+    const h = harness();
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    expect((await h.call({ op: 'consent-status' }, { token })).body).toEqual({ status: 'ok', consent: 'absent' });
+    const granted = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    expect(granted).toMatchObject({ statusCode: 200, body: { status: 'ok', consent: 'granted', changed: true } });
+    const r = await h.call({ op: 'decide' }, { token });
+    expect(r).toMatchObject({
+      statusCode: 200,
+      body: {
+        status: 'decided', marker: 'climbing-planner', evidence: false, financialAuthorization: false,
+      },
+    });
+    const sent = JSON.parse(h.fetchImpl.mock.calls[1][1].body);
+    expect(sent.id.marketingCloudVisitorId).toBe(ECID);
+    for (const secret of [SUB, KEY, ECID, BLOB, token]) {
+      expect(JSON.stringify(r.body)).not.toContain(secret);
+      h.lines.forEach((l) => expect(l).not.toContain(secret));
+    }
+    expect(h.lines.map((l) => JSON.parse(l))).toContainEqual(expect.objectContaining({ op: 'decide', status: 'decided' }));
+  });
+
+  test('decide without consent: no ID Service or Target call, categorized reason', async () => {
+    const h = harness();
+    await seedCustomer(h.store);
+    const r = await h.call({ op: 'decide' }, { token: await auth0Token() });
+    expect(r.body).toMatchObject({ status: 'unavailable', reason: 'no-trusted-binding', bindingReason: 'consent-absent' });
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test('withdrawal during the Target request: no stale marker, bindings removed', async () => {
+    const h = harness({
+      onTarget: async (store) => {
+        await store.collection('customers').updateOne({ sub: SUB }, { $set: { 'idLinkage.state': 'withdrawn', 'idLinkage.grantId': null } });
+      },
+    });
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    const r = await h.call({ op: 'decide' }, { token });
+    expect(r.body).toMatchObject({ status: 'unavailable', reason: 'consent-changed' });
+    expect(r.body.marker).toBeUndefined();
+    const w = await h.call({ op: 'consent', optIn: false }, { token });
+    expect(w.body).toEqual({ status: 'ok', consent: 'withdrawn', changed: false });
+  });
+
+  test('reconsent during the Target request (new grantId): no stale marker', async () => {
+    const h = harness({
+      onTarget: async (store) => {
+        await store.collection('customers').updateOne({ sub: SUB }, { $set: { 'idLinkage.grantId': '00000000-0000-4000-8000-000000000000' } });
+      },
+    });
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    expect((await h.call({ op: 'decide' }, { token })).body).toMatchObject({ reason: 'consent-changed' });
+  });
+
+  test('withdrawal via the action removes the shopper\'s stored binding', async () => {
+    const h = harness();
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    await h.call({ op: 'decide' }, { token });
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
+    expect((await h.call({ op: 'consent', optIn: false }, { token })).body).toEqual({ status: 'ok', consent: 'withdrawn', changed: true });
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+  });
+
+  test('withdrawal works with linkage off (never blocked), a grant does not', async () => {
+    const h = harness({ config: { ...BASE } });
+    await seedCustomer(h.store);
+    h.store.collection('customers').updateOne({ sub: SUB }, { $set: { idLinkage: { state: 'granted', grantId: '00000000-0000-4000-8000-000000000001' } } });
+    const token = await auth0Token();
+    expect((await h.call({ op: 'consent', optIn: false }, { token })).body).toMatchObject({ consent: 'withdrawn', changed: true });
+    expect((await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token })).body.reason).toBe('linkage-disabled');
+  });
+
+  test('no customer record → 404 no-customer; store failure → 503 store-unavailable; both logged by category', async () => {
+    const h = harness();
+    const token = await auth0Token();
+    expect((await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token })).body.reason).toBe('no-customer');
+    h.getStore.mockRejectedValueOnce(new Error(`connect failed for ${SUB}`));
+    expect(await h.call({ op: 'consent-status' }, { token })).toMatchObject({ statusCode: 503, body: { reason: 'store-unavailable' } });
+    h.lines.forEach((l) => expect(l).not.toContain(SUB));
+  });
+
+  test('an unexpected failure is a sanitized 500 (error name/code only), never success', async () => {
+    const h = harness();
+    await seedCustomer(h.store);
+    jest.spyOn(h.store.collection('customers'), 'findOne').mockRejectedValueOnce(Object.assign(new Error(`boom ${SUB}`), { code: 'E_DB' }));
+    const r = await h.call({ op: 'consent-status' }, { token: await auth0Token() });
+    expect(r).toMatchObject({ statusCode: 500, body: { status: 'unavailable', reason: 'internal' } });
+    const parsed = h.lines.map((l) => JSON.parse(l));
+    expect(parsed).toContainEqual(expect.objectContaining({ category: 'internal', errorName: 'Error', errorCode: 'E_DB' }));
+    h.lines.forEach((l) => expect(l).not.toContain('boom'));
+  });
+});
+
+test('the action module never touches promotions, cart, orders or shopper audiences', () => {
+  const fs = require('node:fs');
+  ['../lib/target-diagnostic-action', '../lib/id-linkage-consent', '../lib/target-binding-store', '../actions/target-diagnostic/index']
+    .forEach((m) => {
+      const src = fs.readFileSync(require.resolve(m), 'utf8');
+      ['promotions', 'promotion-evaluation', 'shopper-audiences', 'cart', 'orders'].forEach((dep) => {
+        expect(src).not.toMatch(new RegExp(`require\\('(\\.\\./)+(lib/)?${dep}'\\)|require\\('\\./${dep}'\\)`));
+      });
+    });
+});

@@ -340,11 +340,11 @@ default off, never inferred from sign-in or checkout). Safety defaults:
   Production fallback: a missing URL refuses execution before provider calls and leaves the run
   approved. Production must use `https://wknd-adventures.run.place/shop/cart`. Stage must use a
   storefront actually configured for Stage Commerce, not merely an EDS preview hostname.
-  The intended Stage destination is
-  `https://feat-aam-stage-pilot--masterclass-demo--znikolovski.aem.page/shop/cart`, but its Commerce
-  configuration currently points to Production. Keep Stage `WKND_SHOP_CART_URL` unconfigured
-  until dedicated Stage routing is published and verified by its owner. Tests and offline
-  template examples do not establish runtime acceptance. Do not reuse `WKND_SITE_ORIGIN`,
+  The independently verified Stage storefront destination is
+  `https://feat-aam-stage-pilot--masterclass-demo--znikolovski.aem.page/shop/cart`.
+  Stage email configuration remains unconfigured pending authoritative worker input provenance;
+  a source merge or verified storefront route does not configure the worker or authorize sends.
+  Tests and offline template examples do not establish runtime acceptance. Do not reuse `WKND_SITE_ORIGIN`,
   which is also used for canonical product links.
 
 Actions:

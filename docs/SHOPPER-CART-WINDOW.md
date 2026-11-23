@@ -1,6 +1,7 @@
 # Stage one-hour shopper cart window
 
-This audience-source slice is separate from the unchanged **24-hour financial recovery policy**.
+This audience-source slice is separate from the **55-minute financial/email recovery policy**
+(nominal automatic reminder trigger at the next five-minute alarm, within 55–60 minutes).
 The approved window is nonempty active owner carts with valid quantities and activity,
 inactivity **>=1 hour and <=7 days**, and no recorded owner purchase since that cart's activity.
 Malformed/incomplete purchase/activity evidence stays unknown, not false. Any qualifying cart

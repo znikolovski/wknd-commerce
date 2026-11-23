@@ -122,17 +122,17 @@ describe('approved automatic schedule', () => {
     });
   });
 
-  test('automatically sends only in the unchanged 24h..7d window, once per episode', async () => {
+  test('email and financial recovery qualify at 55 minutes, not before, once per episode', async () => {
     await enableOffer();
     await createRecoveryEmail({ store, params, clock }).resume();
-    await shopper('auth0|ava', 'ava@example.com', { idleHours: 30 });
-    await shopper('auth0|ben', 'ben@example.com', { idleHours: 1 });
+    await shopper('auth0|ava', 'ava@example.com', { idleHours: 55 / 60 });
+    await shopper('auth0|ben', 'ben@example.com', { idleHours: (55 * 60 - 1) / 3600 });
     expect(await run()).toMatchObject({ state: 'completed', sent: 1 });
     expect(await run()).toEqual({ state: 'idle' });
     expect(await executeNextApprovedRun({
-      store, params, clock: () => NOW + 6 * 60 * 1000, createClient: () => brevo,
-    })).toMatchObject({ state: 'completed', sent: 0 });
-    expect(sent).toHaveLength(1);
+      store, params, clock: () => NOW + 24 * HOUR, createClient: () => brevo,
+    })).toMatchObject({ state: 'completed', sent: 1 });
+    expect(sent.map((message) => message.to.email)).toEqual(['ava@example.com', 'ben@example.com']);
     expect(sent[0].params).toMatchObject({ PERCENT_OFF: 10, MAX_DISCOUNT: 25 });
   });
 

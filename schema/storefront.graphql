@@ -543,7 +543,7 @@ type Query {
 
   """
   Signed-in shopper's cart-recovery offer status for one of their carts. Server-evaluated
-  operational cohort (inactive 24h to 7 days, no purchase since); read-only.
+  operational cohort (inactive 55 minutes to 7 days, no purchase since); read-only.
   """
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
 
@@ -7744,6 +7744,8 @@ type Discount {
 
   """Quote line item discount value."""
   value: Float
+  wknd_bundle_id: String
+  wknd_experiment_id: String
 }
 
 """"""

@@ -4,12 +4,14 @@
  */
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const { resetCatalogCache, loadCatalog } = require('../lib/catalog');
 const { migrateLegacyPromotions } = require('../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../lib/recovery-policy');
 const { createPromotionsAdmin, imsOperatorFrom } = require('../lib/promotions-admin');
+jest.mock('../lib/store', () => ({ ...jest.requireActual('../lib/store'), getStore: jest.fn() }));
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
 const ORG = 'ORG@AdobeOrg';
@@ -59,6 +61,25 @@ describe('operator identity', () => {
 });
 
 describe('promotions', () => {
+  test('action boundary preserves flattened original request UUID for read-only reconciliation', async () => {
+    const idempotencyKey = crypto.randomUUID();
+    const created = await api.handle(ava, 'promotions.create', { promotion: draft(), idempotencyKey });
+    require('../lib/store').getStore.mockResolvedValue(store);
+    const { main } = require('../actions/promotions-admin');
+    const response = await main({
+      ...PARAMS, __ow_headers: headersFor(ava.subject),
+      __ow_body: JSON.stringify({ op: 'promotions.get', request: { operation: 'create', idempotencyKey } }),
+    });
+    expect(response).toMatchObject({
+      statusCode: 200, body: {
+        apiVersion: 'wknd.promotions/v1', ok: true, committed: true,
+        promotion: { id: created.promotion.id },
+        request: { operation: 'create', idempotencyKey },
+      },
+    });
+    expect(await store.collection('promotions').countDocuments({ id: created.promotion.id })).toBe(1);
+  });
+
   test('create as a disabled draft, list, then enable with a revision check', async () => {
     const created = await api.handle(ava, 'promotions.create', { promotion: draft() });
     expect(created).toMatchObject({ ok: true, promotion: { enabled: false, revision: 1, mode: 'automatic' } });

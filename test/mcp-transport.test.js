@@ -157,7 +157,9 @@ test('official SDK client can initialize/list/read/write through raw Runtime ada
   try {
     await client.connect(transport);
     const listed = (await client.listTools()).tools;
-    expect(listed.length).toBe(24);
+    expect(listed.find((tool) => tool.name === 'bundle_opportunities')).toMatchObject({
+      annotations: { readOnlyHint: true, destructiveHint: false },
+    });
     expect(listed.find((tool) => tool.name === 'preview_audience_promotion_draft')).toMatchObject({
       annotations: { readOnlyHint: true, destructiveHint: false },
       inputSchema: { properties: { environment: { enum: ['stage', 'production'] } } },

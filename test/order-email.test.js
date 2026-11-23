@@ -13,6 +13,7 @@ const PARAMS = {
   ORDER_CONFIRMATION_ENABLED: 'true',
   ORDER_CONFIRMATION_SENDER_EMAIL: 'hello@example.com',
   ORDER_CONFIRMATION_SENDER_NAME: 'WKND Adventures',
+  RECOVERY_EMAIL_ALLOWLIST: 'pilot-only@example.com',
 };
 let store;
 let now;
@@ -44,13 +45,14 @@ beforeEach(() => {
   sendEmail = jest.fn().mockResolvedValue({ messageId: 'offline-message' });
 });
 
-test('durable completed guest order queues exactly one receipt with persisted totals, without marketing consent', async () => {
+test('durable guest order queues exactly one receipt with persisted totals, without marketing consent or test-recipient restrictions', async () => {
   const { cat, cart } = await orderFixture();
   const order = await placeOrder(store, cat, cart, null);
   expect(order.emailConfirmation.state).toBe('pending');
   expect(sendEmail).not.toHaveBeenCalled();
   await Promise.all([run(), run()]);
   expect(sendEmail).toHaveBeenCalledTimes(1);
+  expect(sendEmail.mock.calls[0][0].to).toEqual([{ email: 'guest@example.com' }]);
   expect(sendEmail.mock.calls[0][0].textContent).toContain(`Total: AUD ${order.totals.grandTotal.toFixed(2)}`);
   expect(sendEmail.mock.calls[0][0].textContent).toContain('no payment was taken');
   await run();
@@ -131,8 +133,13 @@ test('automatic defaults apply only to the real Production namespace', () => {
     process.env.__OW_NAMESPACE = '28538-wkndcommerce-stage';
     expect(emailParams({})).toEqual({});
     process.env.__OW_NAMESPACE = '28538-wkndcommerce';
-    expect(emailParams({})).toMatchObject({ RECOVERY_EMAIL_AUTOMATION_ENABLED: 'true', SHOP_CART_URL: 'https://wknd-adventures.run.place/shop/cart' });
+    expect(emailParams({})).toMatchObject({
+      RECOVERY_EMAIL_AUTOMATION_ENABLED: 'true',
+      RECOVERY_EMAIL_ALLOWLIST_DISABLED: 'true',
+      SHOP_CART_URL: 'https://wknd-adventures.run.place/shop/cart',
+    });
     expect(emailParams({ RECOVERY_EMAIL_AUTOMATION_ENABLED: 'false' }).RECOVERY_EMAIL_AUTOMATION_ENABLED).toBe('false');
+    expect(emailParams({ RECOVERY_EMAIL_ALLOWLIST_DISABLED: 'false' }).RECOVERY_EMAIL_ALLOWLIST_DISABLED).toBe('false');
   } finally {
     if (old === undefined) delete process.env.__OW_NAMESPACE;
     else process.env.__OW_NAMESPACE = old;

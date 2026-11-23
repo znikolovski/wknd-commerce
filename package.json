@@ -36,6 +36,7 @@
     "typescript": "^5.5.4"
   },
   "scripts": {
+    "preview:promotion-authoring": "node scripts/preview-promotion-authoring.mjs",
     "test": "jest --testEnvironment node test",
     "test:contract": "jest --testEnvironment node test/contract",
     "lint": "eslint --ignore-pattern web-src --no-error-on-unmatched-pattern test lib actions scripts",

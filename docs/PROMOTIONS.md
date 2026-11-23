@@ -19,6 +19,140 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 
 ## Management service
 
+### C01 restricted draft authoring (`wknd.promotion-drafts/v2`)
+
+The additive draft service in `lib/promotion-drafts.js` stores metadata in
+`promotion_drafts_v2`, **not** `promotions`. It does not call the audience resolver,
+evaluation engine, promotion effects, email or recovery runtime. Frozen `wknd.promotions/v1`
+remains null-only for audience restrictions. Draft IDs use `pdr_`, not live `prm_` IDs.
+There is no enable/apply operation or automatic promotion of a draft into the live engine.
+All results report `financialAuthorization: false` and
+`activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
+
+Exact draft DTO:
+
+```json
+{
+  "apiVersion": "wknd.promotion-drafts/v2",
+  "ok": true,
+  "persisted": true,
+  "financialAuthorization": false,
+  "activation": { "blocked": true, "reason": "PROVIDER_NOT_VERIFIED" },
+  "draft": {
+    "id": "pdr_0123456789abcdef0123456789abcdef",
+    "revision": 1,
+    "state": "draft",
+    "promotion": {
+      "name": "Climbing Planner draft",
+      "enabled": false,
+      "mode": "automatic",
+      "code": null,
+      "discount": { "kind": "percentage", "basisPoints": 1000 },
+      "maxDiscountMinor": 2500,
+      "minimumMerchandiseMinor": null,
+      "target": { "kind": "all" },
+      "startsAt": null,
+      "endsAt": null,
+      "audienceRestriction": { "environment": "stage", "key": "climbing-planner", "version": 1 }
+    },
+    "createdAt": "2026-11-23T00:00:00.000Z",
+    "updatedAt": "2026-11-23T00:00:00.000Z"
+  }
+}
+```
+
+The example ID/timestamps illustrate the shape, not a live saved record. The restriction is
+a required, non-null reference to configured Stage `climbing-interest` or `climbing-planner`,
+version 1; raw AAM IDs, other environments/versions, caller evidence and unknown fields are
+rejected. Draft validation reuses v1 term normalization; no behavior rules or membership evaluator
+are copied. `enabled: true` returns `RESTRICTED_ACTIVATION_BLOCKED` before storage.
+
+| Admin operation | MCP tool | Arguments |
+| --- | --- | --- |
+| `promotions.drafts.validate` | `validate_audience_promotion_draft` | `{ promotion }` |
+| `promotions.drafts.create` | `create_audience_promotion_draft` | `{ idempotencyKey, promotion }` |
+| `promotions.drafts.get` | `get_audience_promotion_draft` | `{ id }` |
+| `promotions.drafts.list` | `list_audience_promotion_drafts` | `{ limit?, after? }` |
+| `promotions.drafts.update` | `update_audience_promotion_draft` | `{ id, expectedRevision, promotion }` |
+| `promotions.drafts.delete` | `delete_audience_promotion_draft` | `{ id, expectedRevision }` |
+
+Existing IMS/integration authentication is unchanged. Drafts are organisation-scoped; actor
+audit metadata stays private. Draft CRUD is separate from the MCP financial-promotion write gate,
+which remains off. Create permits v1 optional term defaults plus the required restriction;
+update requires every mutable definition field. List is ID-ordered, capped at 50, and returns
+`nextAfter` (pass it as `after`). Update and delete use single-document revision compare-and-swap.
+Delete leaves a tombstone; it does not touch a live offer or allow the create key to resurrect it.
+
+Reuse the original UUIDv4 create key on uncertain outcomes. The deterministic actor-scoped ID
+prevents duplicate drafts; a changed definition with the same key returns `IDEMPOTENCY_CONFLICT`.
+Create replay returns the current draft, including any subsequent updates, without resetting it.
+For update/delete conflicts or uncertain outcomes, read the draft before deciding on another write.
+`REVISION_CONFLICT`, `DRAFT_NOT_FOUND`, `DRAFT_DELETED` and `INVALID_DRAFT` are explicit errors.
+Database failures propagate to the existing transport's logged error path, never a simulated success.
+
+The existing **Audience promotion drafts** picker validates/saves/opens/updates/deletes through
+this same service. It edits name, canonical audience, discount and cap while preserving other
+terms from opened drafts. The legacy live Promotions editor and engine are unchanged.
+
+Run `npm run preview:promotion-authoring` and open `http://127.0.0.1:4178` for a
+**local memory demonstration** of the same service. Saved metadata survives requests, but clears
+on process restart; every response is labelled `localSimulation: true`,
+`storage: "memory-cleared-on-restart"`. This is not a live API or proof of deployed database
+persistence. Admin/MCP persistent-store integration is source-only until separately approved deployment.
+No deploy, financial gate changes or live business writes are part of C01.
+
+### C02 audience draft fixture (not a live promotion API)
+
+Run `npm run preview:promotion-authoring`, then open `http://127.0.0.1:4178`.
+The preview now demonstrates C01 draft CRUD in explicitly simulated memory. The preserved
+C02 `POST /preview` fixture endpoint and MCP preview tool still return non-persisting fixture JSON.
+They reuse the C01 restriction/term validator and need no credentials, live database, provider or deploy.
+Stop the local server with Ctrl-C. `PORT` can select another local port.
+
+The Stage metadata catalogue maps `climbing-interest` to AAM `27507403` and `climbing-planner`
+to AAM `27507404`, both version 1. These bindings mirror the existing draft canonical registry
+in `origin/feat/audience-evidence-dto` at `f9c9181` (`lib/shopper-audiences.js`, `DRAFT_STAGE_ENTRIES`).
+Entries retain `status: "draft"` and `transport: "unverified"`; their source DPID and merge rule
+are administrative metadata, not proof of a working identity mapping.
+The catalogue has no evaluator, behavior rules, membership evidence or activation attestations.
+
+Read-only adapters (existing IMS/MCP authentication unchanged):
+
+- Admin `promotions.authoringAudiences`; MCP `list_promotion_authoring_audiences`.
+- Admin `promotions.previewAudienceDraft`; MCP `preview_audience_promotion_draft`.
+
+Example input to the preview operation/tool:
+
+```json
+{
+  "environment": "stage",
+  "audienceKey": "climbing-planner",
+  "promotion": {
+    "name": "Climbing planner demo",
+    "enabled": false,
+    "mode": "automatic",
+    "discount": { "kind": "percentage", "basisPoints": 1000 },
+    "maxDiscountMinor": 2500,
+    "target": { "kind": "all" },
+    "audienceRestriction": null
+  }
+}
+```
+
+Output is `schema: "wknd.promotion-authoring/fixture-v1"`, `mode: "fixture"`,
+`persisted: false`, `financialAuthorization: false`, and
+`activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
+`fixturePreview` contains separate `audience` metadata and the normalized, disabled `promotion`.
+It is **not** a live non-null restriction DTO and must not be submitted to `create_promotion`.
+Validation reuses the frozen definition validator for syntax, bounds, normalization and date order;
+it does not verify current catalogue references, coupon uniqueness, membership or financial eligibility.
+Unknown fields, raw audience IDs, other environments and `enabled: true` are explicitly rejected.
+Invalid preview arguments return `ok: false`, `error.code: "INVALID_DRAFT"` and field errors.
+
+**Handoff:** C01 above supplies the versioned, persisted **disabled draft** contract, shared by
+admin/MCP. Frozen v1 remains null-only. Draft authoring does not depend on a financial provider;
+financial activation stays blocked and future runtime integration is outside this slice.
+
 ```js
 const { createPromotionService } = require('./lib/promotions');
 const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store), cursorKey, params });

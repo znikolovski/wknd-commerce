@@ -15,6 +15,14 @@ const COMPLETE = {
 };
 
 describe('deploy input check (fail closed)', () => {
+  test.each([
+    ['Production', { WKND_TARGET_DIAG_ENVIRONMENT: 'production' }, 'requires Stage'],
+    ['missing binding config', { WKND_TARGET_DIAG_ENVIRONMENT: 'stage' }, 'configured diagnostic/binding gates'],
+  ])('the Stage planner demo refuses %s rather than changing Production/identity defaults', (_, extra, message) => {
+    const checked = checkDeployEnv({ env: { ...COMPLETE, ...extra, WKND_STAGE_AAM_GENERAL_OFFERS_ENABLED: 'true' } });
+    expect(checked.ok).toBe(false);
+    expect(checked.errors.join('\n')).toContain(message);
+  });
   test('the manifests reference every promotion gate', () => {
     const names = referencedNames(manifests);
     Object.keys(GATES).forEach((g) => expect(names).toContain(g));

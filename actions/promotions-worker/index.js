@@ -9,12 +9,21 @@ const { getStore } = require('../../lib/store');
 const { loadCatalog } = require('../../lib/catalog');
 const { createPromotionService } = require('../../lib/promotions');
 const { createRecoveryEmail, executeNextApprovedRun } = require('../../lib/recovery-email');
+const { refreshStageCartWindows } = require('../../lib/stage-cart-window-tick');
 
 async function main(params) {
   const logger = logging('promotions-worker', { level: params.LOG_LEVEL || 'info' });
   let store;
   try {
     store = await getStore(params);
+    let cartWindow;
+    try {
+      cartWindow = await refreshStageCartWindows({
+        store, params, report: () => logger.warn('Stage cart window handoff unavailable'),
+      });
+    } catch {
+      cartWindow = { state: 'unavailable' };
+    }
     const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store), params });
     const promotions = await svc.recoverRequests();
     const staleEmailClaims = await createRecoveryEmail({ store, params }).reconcileStaleClaims();
@@ -25,7 +34,7 @@ async function main(params) {
       logger.error(e);
       email = { state: 'error' };
     }
-    const result = { promotions, staleEmailClaims, email };
+    const result = { promotions, staleEmailClaims, email, cartWindow };
     logger.info(JSON.stringify(result));
     return result;
   } catch (e) {

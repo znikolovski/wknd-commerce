@@ -69,3 +69,14 @@ while preserving all parameters/security; a later cart read reconciles stale pla
 
 Upstream withdrawal, live qualification and
 cross-channel completeness are separate checks, not prerequisites for this mock wiring.
+# Production-capable release boundary
+
+The shared provider/schema supports exact Runtime namespace `28538-wkndcommerce` only with a
+separate source-controlled `productionDemo:true` release, Production environment/namespace and
+verified Target configuration gate. It requests `wknd-aam-production-eligibility-v1` and rejects
+Stage-marked offers. A Target observation remains `evidence:false, financialAuthorization:false`.
+No restricted authoring draft or legacy financial authorization gate is activated or bypassed.
+The Production demo candidate has a distinct ID; normal best-saving selection and labels apply.
+Ordinary builds stay OFF. Source capability does not assert Production Target/DPID/PMR readiness;
+verify those independently before populating the release gate. Stage689010 is not repurposed.
+The separate [one-hour cart window](SHOPPER-CART-WINDOW.md) remains Stage-only.

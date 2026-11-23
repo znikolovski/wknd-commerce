@@ -7,6 +7,7 @@ const { shopperKey } = require('../lib/recovery-policy');
 const { sha256 } = require('../lib/promotion-schema');
 const { PARTNER } = require('../lib/target-id-retirement');
 const { STAGE_NAMESPACE, stageFactsEnabled } = require('../lib/stage-planner-release');
+const { refreshStageCartWindows } = require('../lib/stage-cart-window-tick');
 
 const NOW = Date.parse('2026-11-23T08:00:00.000Z');
 const SUB = 'auth0|synthetic-fact-shopper';
@@ -52,6 +53,21 @@ beforeEach(async () => {
   service = make();
 });
 afterEach(() => jest.useRealTimers());
+
+test('scheduled refresh emits owner aggregate at one hour without a request, never mints and retains consent guards', async () => {
+  const tick = () => refreshStageCartWindows({
+    enabled: true, store, params, namespace: STAGE_NAMESPACE, fetchImpl, now: () => NOW,
+  });
+  expect(await tick()).toMatchObject({ acknowledged: 1, unavailable: 0 });
+  const signal = new URL(fetchImpl.mock.calls[0][0]);
+  expect(signal.pathname).toBe('/event');
+  expect(signal.searchParams.get('c_wknd_stage_shopper_cart_window')).toBe('within-window');
+  expect(signal.searchParams.get('c_wknd_stage_shopper_cart_count')).toBe('1');
+  expect(signal.searchParams.has('c_wknd_stage_cart_state')).toBe(false);
+  await store.collection('customers').updateOne({ sub: SUB }, { $set: { 'idLinkage.state': 'withdrawn' } });
+  expect(await tick()).toMatchObject({ acknowledged: 0, unavailable: 0 });
+  expect(fetchImpl).toHaveBeenCalledTimes(1);
+});
 
 test('maps facts only, preserving tri-state and omitting absent optional values', async () => {
   await store.collection('orders').insertOne({ customerSub: SUB, createdAt: 'invalid', status: 'Processing (demo)' });

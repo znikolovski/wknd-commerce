@@ -3,7 +3,7 @@ const { createBindingStore } = require('../lib/target-binding-store');
 const { createStageLiveAudienceProvider } = require('../lib/stage-live-audience');
 const { shopperKey } = require('../lib/recovery-policy');
 const { sha256 } = require('../lib/promotion-schema');
-const { MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
+const { MBOX, PRODUCTION_MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
 
 const SUB = 'auth0|synthetic-stage-demo';
 const ISSUER = 'https://example.auth0.com/';
@@ -22,7 +22,10 @@ const params = {
   TARGET_ID_ORG_ID: 'A'.repeat(24) + '@AdobeOrg', TARGET_ID_DPID: '1547309',
   TARGET_CLIENT_CODE: 'exampleclient', TARGET_PROPERTY_TOKEN: '11111111-2222-4333-8444-555555555555',
 };
-async function harness({ marker = 'climbing-planner', change = {}, consent = 'granted', bound = true, response } = {}) {
+async function harness({
+  marker = 'climbing-planner', change = {}, consent = 'granted', bound = true, response,
+  namespace = NS, productionDemo = false,
+} = {}) {
   const store = createMemoryStore();
   await store.collection('customers').insertOne({ sub: SUB, idLinkage: { state: consent, grantId: GRANT } });
   if (bound) await createBindingStore(store).put(KEY, {
@@ -36,10 +39,33 @@ async function harness({ marker = 'climbing-planner', change = {}, consent = 'gr
     }] }] } },
   }));
   const provider = createStageLiveAudienceProvider({
-    params: { ...params, ...change }, store, registryKeysByMarker: mapping, fetchImpl, now: () => T0, namespace: NS,
+    params: { ...params, ...change }, store, registryKeysByMarker: mapping, fetchImpl, now: () => T0, namespace,
+    productionDemo,
   });
   return { store, fetchImpl, provider };
 }
+
+test('explicit Production demo uses its own namespace/mbox/environment and rejects Stage offers', async () => {
+  const options = {
+    namespace: '28538-wkndcommerce', productionDemo: true,
+    change: { TARGET_DIAG_ENVIRONMENT: 'production', TARGET_DIAG_PRODUCTION_NAMESPACE: '28538-wkndcommerce', TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true' },
+    response: { execute: { mboxes: [{ name: PRODUCTION_MBOX, options: [{
+      type: 'json', content: { schema: REQUEST_SCHEMA, environment: 'production', marker: 'climbing-planner', financialAuthorization: false },
+    }] }] } },
+  };
+  const h = await harness(options);
+  expect(await h.provider.resolve({ customer: { sub: SUB }, registryKey: mapping['climbing-planner'] }))
+    .toMatchObject({ status: 'member', evidence: false, financialAuthorization: false });
+  const disabled = await harness({ ...options, productionDemo: false });
+  expect(disabled.provider.configured).toBe(false);
+  const wrong = await harness({ ...options, response: {
+    execute: { mboxes: [{ name: PRODUCTION_MBOX, options: [{
+      type: 'json', content: { schema: REQUEST_SCHEMA, environment: 'stage', marker: 'climbing-planner', financialAuthorization: false },
+    }] }] },
+  } });
+  expect(await wrong.provider.resolve({ customer: { sub: SUB }, registryKey: mapping['climbing-planner'] }))
+    .toMatchObject({ status: 'unknown' });
+});
 
 test.each(['climbing-planner', 'climbing-interest'])('maps only canonical %s to its server-owned registry key', async (marker) => {
   const h = await harness({ marker });

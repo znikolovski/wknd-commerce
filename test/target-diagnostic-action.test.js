@@ -71,7 +71,7 @@ const offerBody = (marker, environment = 'stage', mbox = MBOX) => ({
 });
 
 function harness({
-  config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget, targetBody,
+  config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget, targetBody, retirementBody,
 } = {}) {
   const lines = [];
   const logger = { info: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
@@ -83,6 +83,9 @@ function harness({
           d_mid: ECID, dcs_region: '9', id_sync_ttl: '604800', d_blob: BLOB,
         }),
       };
+    }
+    if (String(url).startsWith('https://ags050.demdex.net/')) {
+      return { ok: true, json: async () => retirementBody || { errors: [{ code: 171 }], dcs_region: 9 } };
     }
     if (onTarget) await onTarget(store);
     const environment = config.TARGET_DIAG_ENVIRONMENT;
@@ -116,6 +119,57 @@ const expectUntouched = (h) => {
   expect(h.getStore).not.toHaveBeenCalled();
   expect(h.fetchImpl).not.toHaveBeenCalled();
 };
+
+describe('owned retirement operation remains separately gated and identifier-free', () => {
+  test.each([
+    ['OFF default', {}, { op: 'retirement', step: 'submit' }, 'TARGET_ID_RETIREMENT_ENABLED'],
+    ['wrong organization', { TARGET_ID_RETIREMENT_ENABLED: 'true', TARGET_ID_ORG_ID: '0'.repeat(24) + '@AdobeOrg' }, { op: 'retirement', step: 'submit' }, 'TARGET_ID_ORG_ID'],
+    ['caller ECID', { TARGET_ID_RETIREMENT_ENABLED: 'true' }, { op: 'retirement', step: 'submit', ecid: ECID }, null],
+  ])('%s is refused before store or upstream calls', async (_, over, body, gate) => {
+    const h = harness({ config: { ...LIVE, ...over } });
+    const response = await h.call(body, { token: await auth0Token() });
+    expect(response.statusCode).toBe(gate ? 503 : 400);
+    expect(response.body).toMatchObject(gate ? { gate } : { reason: 'invalid-request' });
+    expectUntouched(h);
+  });
+
+  test('submit and observe use only the withdrawn server-issued MID with ID issuance OFF', async () => {
+    const config = { ...LIVE, TARGET_ID_RETIREMENT_ENABLED: 'true' };
+    const h = harness({ config });
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    await h.call({ op: 'decide' }, { token });
+    await h.call({ op: 'consent', optIn: false }, { token });
+    config.TARGET_ID_SERVICE_ENABLED = 'false';
+    const submitted = await h.call({ op: 'retirement', step: 'submit' }, { token });
+    expect(submitted).toMatchObject({ statusCode: 200, body: { environment: 'stage', submission: 'submitted', observation: 'not-observed' } });
+    const observed = await h.call({ op: 'retirement', step: 'observe' }, { token });
+    expect(observed).toMatchObject({
+      statusCode: 200, body: { environment: 'stage', observation: 'opt-out-observed', coverage: 'incomplete', financialAuthorization: false },
+    });
+    const record = (await h.store.collection(BINDING_COLLECTION).find({}))[0].record;
+    expect(record).toMatchObject({ state: 'retiring', ecid: ECID, ecidSource: 'server-issued', retirement: { state: 'pending' } });
+    [ECID, SUB, KEY, token, BLOB].forEach((id) => {
+      expect(JSON.stringify(observed.body)).not.toContain(id);
+      expect(h.lines.join('\n')).not.toContain(id);
+    });
+  });
+
+  test('absent-purpose status, withdrawal and retirement remain read-only', async () => {
+    const h = harness({ config: { ...LIVE, TARGET_ID_RETIREMENT_ENABLED: 'true' } });
+    await seedCustomer(h.store);
+    const collection = jest.spyOn(h.store, 'collection');
+    const update = jest.spyOn(h.store.collection('customers'), 'updateOne');
+    const token = await auth0Token();
+    expect((await h.call({ op: 'consent-status' }, { token })).body.consent).toBe('absent');
+    expect((await h.call({ op: 'consent', optIn: false }, { token })).body.changed).toBe(false);
+    expect((await h.call({ op: 'retirement', step: 'submit' }, { token })).body.reason).toBe('consent-absent');
+    expect(update).not.toHaveBeenCalled();
+    expect(collection.mock.calls.every(([name]) => name === 'customers')).toBe(true);
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+  });
+});
 
 describe('Production preparation remains inert and isolated', () => {
   const production = {

@@ -167,6 +167,8 @@ describe('issuance, reuse and resync', () => {
       subject: SUBJECT,
       orgId: ORG,
       dpid: DPID,
+      ecidSource: 'server-issued',
+      regionHints: { anonymousMint: 9, lastBound: 9 },
       consentGrantId: 'consent-evt-1',
       ecid: ECID_A,
       locationHint: 9,
@@ -310,6 +312,19 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
 });
 
 describe('durable issuance and retirement boundaries', () => {
+  test('retirement preserves distinct anonymous-mint and last-bound region hints', async () => {
+    const fetchImpl = jest.fn()
+      .mockResolvedValueOnce({ ok: true, json: async () => idResponse({ dcs_region: 6 }) })
+      .mockResolvedValueOnce({ ok: true, json: async () => idResponse({ dcs_region: 9 }) });
+    const { p, store } = provider({ fetchImpl });
+    await resolveA(p);
+    await p.invalidate(KEY);
+    expect(store.record(KEY)).toMatchObject({
+      state: 'retiring', ecid: ECID_A, ecidSource: 'server-issued',
+      regionHints: { anonymousMint: 6, lastBound: 9 },
+    });
+  });
+
   test('retirement while beforeLink consent lookup is paused prevents any late CID transmission', async () => {
     const store = memoryStore();
     const consent = consentSource();

@@ -1,6 +1,6 @@
 # Target / AAM upstream deletion — operator runbook
 
-Preparation only. No deletion or opt-out was submitted. Local withdrawal stops future linkage,
+Offline implementation only. No live deletion, opt-out or observation was submitted. Local withdrawal stops future linkage,
 invalidates the grant generation and retains known ECIDs as pending retirement; it cannot recall an already sent
 request or erase Adobe-held profiles. Consent withdrawal is not automatically an account-erasure
 request. Legal review is not a project prerequisite; the operational privacy owner determines the
@@ -34,14 +34,26 @@ Local lifecycle containment now works as follows:
 3. Reconsent never discards old pending work or reuses its ID. The provider returns
    `retirement-pending` until a supported retirement/release workflow exists. Local consent status
    may be granted while linking is still unavailable. Do not delete the pending record to unblock it.
-4. No automatic opt-out submission, verification or release worker is implemented in this change.
-   A future authorized device-only submission must validate the exact partner/org and retained MID,
-   preserve pending work on timeout/error, and at most record successful HTTP submission as
-   **submitted/pending**. HTTP acceptance is not proven upstream opt-out or unsegmentation.
+4. The OFF-by-default authenticated operation `{op:'retirement',step:'submit'|'observe'}` uses only
+   the verified shopper's persisted server-issued retiring MID. A scoped CAS sending claim is saved
+   before any request; timeout/crash/unknown response retains identifiers and an unknown outcome.
+   Submission records HTTP transport success as **submitted/pending**, never proven opt-out.
+   Observation uses only the same partner `/event?d_mid=…&d_orgid=…&d_rtbd=json`; it sends no declared
+   ID, cookies, traits, redirects or identity-bearing results. Unknown scoped submission can be
+   observed without automatically resubmitting.
 5. DCS code 171 in documented JSON `errors` or `X-Error` is an observation of opt-out, not proof of
    downstream unsegmentation, historical deletion, or cross-region completion. Do not invent regional
    routing or a verification entitlement. The approved observation, retry, regional coverage and
-   safe release contract remains an activation gate; ID Service stays OFF.
+   safe release contract remains an activation gate; ID Service stays OFF. `coverage:'incomplete'`
+   is retained even when all available hints appear observed. No automatic regional routing,
+   full-verification, retirement release or historical-link deletion is implemented.
+
+Configuration is final server input `TARGET_ID_RETIREMENT_ENABLED` from
+`WKND_TARGET_ID_RETIREMENT_ENABLED` (empty/OFF by default), with binding-store approval, exact
+verified org, DPID, environment/namespace and bounded timeout/lease. It is independent of ID issuance
+and Target activation. Keep it OFF until the three-action compatible release/drain and live storage
+acceptance are verified. Anonymous-mint and last-bound region hints and server-issued provenance are
+persisted before/after linking and preserved through retirement; legacy unproven IDs are refused.
 
 The raw binding-store `remove` primitive remains available for disposable CAS probes. It is **not**
 the withdrawal lifecycle: operational cleanup must not bypass retained retirement work.
@@ -78,7 +90,10 @@ Future authorized release order:
    three intended action changes, unchanged package inputs/bindings/annotations, and unchanged
    fingerprints for every unrelated action. Consent-status/grant/withdrawal acceptance is distinct
    from ID lifecycle activation.
-5. Only after the remaining approved device opt-out observation/coverage/release contract and live
+5. Enable the retirement operation only after compatible artifacts, drainage and live CAS acceptance.
+   This source implementation was tested only with mocks; actual submission/observation semantics
+   and region/destination coverage still require sanctioned live verification. Only after the
+   remaining approved device opt-out observation/coverage/release contract and live
    storage acceptance are satisfied may ID Service activation be considered. Never activate against
    old deletion callers. Once retained IDs exist, do not roll any of these three actions back to an
    old `deleteMany` helper; disable upstream work while preserving retention-aware withdrawal code.
@@ -121,6 +136,8 @@ Future authorized release order:
   — anonymous MID acquisition and subsequent linking of a known MID.
 - [DCS error codes](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/api-and-sdk-code/dcs/dcs-api-reference/dcs-error-codes)
   — opt-out observation code 171 and JSON / X-Error formats.
+- [Supported DCS attributes](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/api-and-sdk-code/dcs/dcs-api-reference/dcs-keys)
+  — `d_mid` and `d_rtbd=json`; no traits/segments entitlement is requested.
 - [Audience Manager identifiers](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/overview/data-privacy/data-privacy-reference/data-privacy-ids)
   — ECID, custom data-source namespace and integration-code formats.
 - [Target privacy and data protection](https://experienceleague.adobe.com/en/docs/target-dev/developer/implementation/privacy/cmp-privacy-and-general-data-protection-regulation)

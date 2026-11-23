@@ -142,6 +142,18 @@ describe('deploy input check (fail closed)', () => {
       expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'false' } }).ok).toBe(true);
     });
 
+    test('retirement is optional and requires verified partner org plus approved storage when enabled', () => {
+      const env = {
+        ...COMPLETE, AIO_runtime_namespace: 'example-runtime', WKND_TARGET_DIAG_ENVIRONMENT: 'stage',
+        WKND_TARGET_DIAG_STAGE_NAMESPACE: 'example-runtime', WKND_TARGET_ID_RETIREMENT_ENABLED: 'true',
+        WKND_TARGET_ID_BINDING_STORE_APPROVED: 'true',
+        WKND_TARGET_ID_ORG_ID: '28260E2056581D3B7F000101@AdobeOrg', WKND_TARGET_ID_DPID: '1547309',
+      };
+      expect(checkDeployEnv({ env }).ok).toBe(true);
+      expect(checkDeployEnv({ env: { ...env, WKND_TARGET_ID_ORG_ID: '0'.repeat(24) + '@AdobeOrg' } }).errors.join()).toContain('WKND_TARGET_ID_ORG_ID');
+      expect(checkDeployEnv({ env: { ...env, WKND_TARGET_ID_BINDING_STORE_APPROVED: 'false' } }).errors.join()).toContain('WKND_TARGET_ID_BINDING_STORE_APPROVED');
+    });
+
     test('Production is permitted only with the mapped namespace; live decide needs verified Target config', () => {
       const env = {
         ...COMPLETE, AIO_runtime_namespace: 'example-runtime', WKND_TARGET_DIAG_ENVIRONMENT: 'production',

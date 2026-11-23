@@ -101,6 +101,7 @@ empty, which means OFF.**
 | `{ op:'consent', optIn:true, wordingVersion, source? }` | Explicit first-party grant: `{ status:'ok', consent, changed }` |
 | `{ op:'consent', optIn:false, source? }` | Withdrawal, always allowed once the base gate passes |
 | `{ op:'decide' }` | The inert diagnostic result: a marker or `unavailable` with a category. `evidence:false`, `financialAuthorization:false` |
+| `{ op:'retirement', step:'submit' }` / `{ op:'retirement', step:'observe' }` | Separately gated, owned device retirement; HTTP submission and code-171 observation remain incomplete, never release the retained MID |
 
 **Gate order.** Each gate fails closed, and a refusal touches nothing.
 
@@ -246,6 +247,9 @@ default provider is still `unavailableBindingProvider`.
   These two use cases are [documented by Adobe](https://experienceleague.adobe.com/en/docs/id-service/using/implementation/direct-integration-examples).
   A failed MID persistence never sends a declared ID. A lost anonymous response may leave an unknown
   anonymous MID upstream, but this implementation has not linked it to a declared ID.
+  Stored MIDs acquired anonymously carry `ecidSource:'server-issued'`; `regionHints.anonymousMint`
+  and `regionHints.lastBound` retain the available issuer/last-bound region hints through retirement.
+  Old records without verified issuance provenance are not submitted by the retirement operation.
   Immediately before linking, re-read CAS ownership after the consent lookup: the same etag must
   still identify this shopper/grant/org/DPID/MID in `issuing`, `phase:'linking'`, with **more than one
   full configured request timeout remaining**. A retired/replaced claim sends no CID; insufficient
@@ -351,9 +355,37 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 - the consent re-checks before sending and before exposing a result.
 
 **Live acceptance gates.** These need approval, evidence or the remaining upstream lifecycle capability;
-each blocks enabling a flag. Pending retirement has no automatic submission/verification/release
-worker. Do not enable ID Service on the strength of this local safety fix alone. See
+each blocks enabling a flag. An explicit authenticated retirement submission/observation operation
+exists, but no automatic scanner, full regional verification or retirement-release worker exists.
+Do not enable ID Service on the strength of this offline slice alone. See
 [the upstream lifecycle runbook](TARGET-UPSTREAM-DELETION.md).
+
+### Owned retirement operation (`lib/target-id-retirement.js`, OFF by default)
+
+Final manifest input `TARGET_ID_RETIREMENT_ENABLED` references
+`WKND_TARGET_ID_RETIREMENT_ENABLED`; missing/empty is OFF. It also requires binding-store approval,
+the verified partner org, configured DPID and bounded ID timeout/lease. It does **not** require ID
+issuance or Target to be ON. Existing authentication, exact namespace, allowlist, delegation refusal,
+strict-body and identifier-free response gates apply. The caller supplies only `step`, never IDs.
+
+Only that verified shopper's persisted `retiring` record, with server-issued provenance, subject hash,
+matching org/DPID and a retained valid MID, is eligible. Absent-purpose status, withdrawal and retirement
+remain read-only. No account/customer mutation or consent change is made by retirement.
+
+- `submit`: persist a scoped CAS sending claim before a cookieless, redirect-refusing device-MID
+  request to `ags050.demdex.net/demoptout.jpg`. HTTP success records `submitted`, not proven opt-out.
+- `observe`: after a submitted **or unknown** scoped submission, request only `d_mid`, `d_orgid`,
+  `d_rtbd=json` from the same partner's `/event`. Strict numeric code 171 from documented JSON
+  `errors` or `X-Error` records `opt-out-observed`. An available response `dcs_region` scopes the
+  observation region; an absent region is explicitly non-regional. Conflicting/invalid responses
+  remain unknown. This sends no declared ID, traits, cookies or `d_cts`.
+- Sending claims survive crashes. An expired claim becomes an unknown outcome; submission is not
+  automatically repeated. A later explicit observation can inspect an unknown scoped submission.
+  CAS failures never claim a durably saved successful result or discard IDs.
+- Every response retains `coverage:'incomplete'`, `historicalDeletion:false`,
+  `unsegmentationVerified:false`, `evidence:false` and `financialAuthorization:false`. No response,
+  including code 171, clears retirement or permits binding reuse. Region hints are not exhaustive
+  coverage; no speculative region routing or regulatory deletion is implemented.
 
 1. **Operational wording.** The operational owner sanctions the ID-linkage wording and adds its
    nonempty version to `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. Legal review is not a project gate.

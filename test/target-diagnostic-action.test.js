@@ -7,7 +7,7 @@ const { createMemoryStore } = require('../lib/store');
 const { shopperKey } = require('../lib/recovery-policy');
 const { verifyToken } = require('../lib/auth');
 const { BINDING_COLLECTION } = require('../lib/target-binding-store');
-const { MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
+const { MBOX, PRODUCTION_MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
 const { createTargetDiagnosticHandler, CONFIG_KEYS } = require('../lib/target-diagnostic-action');
 
 const ISSUER = 'https://example.auth0.com/';
@@ -16,6 +16,8 @@ const SUB = 'auth0|pilot-shopper';
 const OTHER_SUB = 'auth0|other-shopper';
 const KEY = shopperKey(ISSUER, SUB);
 const STAGE_NS = '00000-example-stage';
+// Deliberately no inferred "-prod" suffix.
+const PRODUCTION_NS = '00000-example';
 const ECID = '1'.repeat(38);
 const BLOB = 'issued-blob-value';
 const T0 = Date.UTC(2026, 10, 23);
@@ -25,6 +27,8 @@ const BASE = {
   AUTH0_AUDIENCE: AUDIENCE,
   TARGET_DIAG_ENABLED: 'true',
   TARGET_DIAG_ENVIRONMENT: 'stage',
+  TARGET_DIAG_STAGE_NAMESPACE: STAGE_NS,
+  TARGET_DIAG_PRODUCTION_NAMESPACE: PRODUCTION_NS,
   TARGET_DIAG_SHOPPER_KEYS: KEY,
   TARGET_DIAG_ALLOWED_ORIGINS: 'https://stage.wknd.example',
 };
@@ -52,14 +56,14 @@ const auth0Token = (sub = SUB, over = {}) => new SignJWT({ ...over })
   .setIssuedAt().setExpirationTime('5m')
   .sign(privateKey);
 
-const offerBody = (marker) => ({
+const offerBody = (marker, environment = 'stage', mbox = MBOX) => ({
   execute: {
     mboxes: [{
-      name: MBOX,
+      name: mbox,
       options: [{
         type: 'json',
         content: {
-          schema: REQUEST_SCHEMA, environment: 'stage', marker, financialAuthorization: false,
+          schema: REQUEST_SCHEMA, environment, marker, financialAuthorization: false,
         },
       }],
     }],
@@ -67,7 +71,7 @@ const offerBody = (marker) => ({
 });
 
 function harness({
-  config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget,
+  config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget, targetBody,
 } = {}) {
   const lines = [];
   const logger = { info: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
@@ -81,7 +85,11 @@ function harness({
       };
     }
     if (onTarget) await onTarget(store);
-    return { ok: true, json: async () => offerBody('climbing-planner') };
+    const environment = config.TARGET_DIAG_ENVIRONMENT;
+    return {
+      ok: true,
+      json: async () => targetBody || offerBody('climbing-planner', environment, environment === 'stage' ? MBOX : PRODUCTION_MBOX),
+    };
   });
   const getStore = jest.fn(async () => store);
   const verify = jest.fn((token, cfg) => verifyToken(token, cfg, { jwks }));
@@ -109,13 +117,98 @@ const expectUntouched = (h) => {
   expect(h.fetchImpl).not.toHaveBeenCalled();
 };
 
+describe('Production preparation remains inert and isolated', () => {
+  const production = {
+    ...LIVE, TARGET_DIAG_ENVIRONMENT: 'production', TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true',
+  };
+
+  test('off defaults and unverified Target configuration refuse before any effects', async () => {
+    const off = harness({ ns: PRODUCTION_NS, config: {} });
+    expect((await off.call({ op: 'decide' })).body).toMatchObject({ reason: 'disabled', environment: null });
+    expectUntouched(off);
+    const unverified = harness({ ns: PRODUCTION_NS, config: { ...production, TARGET_DIAG_TARGET_CONFIG_APPROVED: '' } });
+    expect(await unverified.call({ op: 'decide' }, { token: await auth0Token() })).toMatchObject({
+      statusCode: 503, body: { environment: 'production', gate: 'TARGET_DIAG_TARGET_CONFIG_APPROVED' },
+    });
+    expectUntouched(unverified);
+  });
+
+  test.each(['environment', 'TARGET_DIAG_PRODUCTION_NAMESPACE', '__OW_NAMESPACE'])(
+    'a caller cannot select Production through body field %s',
+    async (field) => {
+      const h = harness({ ns: PRODUCTION_NS, config: production });
+      expect((await h.call({ op: 'decide', [field]: 'production' }, { token: await auth0Token() })).statusCode).toBe(400);
+      expectUntouched(h);
+    },
+  );
+
+  test('separate stores do not reuse Stage consent or bindings; Production uses its own mbox and response', async () => {
+    const stage = harness();
+    const prod = harness({ ns: PRODUCTION_NS, config: production });
+    const token = await auth0Token();
+    await seedCustomer(stage.store);
+    await seedCustomer(prod.store);
+    await stage.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    await stage.call({ op: 'decide' }, { token });
+    expect((await prod.call({ op: 'consent-status' }, { token })).body).toMatchObject({ environment: 'production', consent: 'absent' });
+    expect((await prod.call({ op: 'decide' }, { token })).body.bindingReason).toBe('consent-absent');
+    expect(prod.fetchImpl).not.toHaveBeenCalled();
+    await prod.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    const result = await prod.call({ op: 'decide' }, { token });
+    expect(result.body).toMatchObject({ environment: 'production', status: 'decided', marker: 'climbing-planner', financialAuthorization: false });
+    expect(JSON.parse(prod.fetchImpl.mock.calls[1][1].body).execute.mboxes[0].name).toBe(PRODUCTION_MBOX);
+    await prod.call({ op: 'consent', optIn: false }, { token });
+    expect(await prod.store.collection(BINDING_COLLECTION).find({})).toHaveLength(0);
+    expect(await stage.store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
+    expect((await stage.call({ op: 'consent-status' }, { token })).body).toMatchObject({ environment: 'stage', consent: 'granted' });
+  });
+
+  test.each([
+    ['Stage mbox', MBOX, 'no-decision'],
+    ['Stage offer in Production mbox', PRODUCTION_MBOX, 'unexpected-offer'],
+  ])('%s is never accepted as a Production result', async (_, mbox, reason) => {
+    const h = harness({
+      ns: PRODUCTION_NS, config: production, targetBody: offerBody('climbing-planner', 'stage', mbox),
+    });
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    const r = await h.call({ op: 'decide' }, { token });
+    expect(r.body).toMatchObject({ environment: 'production', status: 'unavailable', reason, financialAuthorization: false });
+    expect(r.body.marker).toBeUndefined();
+  });
+
+  test.each([false, true])('Production withdrawal during Target (reconsent=%s) suppresses the old decision', async (reconsent) => {
+    const token = await auth0Token();
+    const h = harness({
+      ns: PRODUCTION_NS,
+      config: production,
+      onTarget: async () => {
+        await h.call({ op: 'consent', optIn: false }, { token });
+        if (reconsent) await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+      },
+    });
+    await seedCustomer(h.store);
+    await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    const before = await h.store.collection('customers').findOne({ sub: SUB });
+    const r = await h.call({ op: 'decide' }, { token });
+    expect(r.body).toMatchObject({ environment: 'production', reason: 'consent-changed' });
+    expect(r.body.marker).toBeUndefined();
+    const after = await h.store.collection('customers').findOne({ sub: SUB });
+    expect(after.idLinkage.grantId).not.toBe(before.idLinkage.grantId);
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(0);
+  });
+});
+
 describe('disabled / unapproved configuration never touches storage, Auth0, the ID Service or Target', () => {
   test.each([
     ['default (nothing configured)', {}, STAGE_NS, 'disabled'],
     ['enabled flag not exactly "true"', { ...LIVE, TARGET_DIAG_ENABLED: 'TRUE' }, STAGE_NS, 'disabled'],
-    ['Production environment', { ...LIVE, TARGET_DIAG_ENVIRONMENT: 'production' }, STAGE_NS, 'not-stage'],
-    ['Production namespace', LIVE, '28538-wkndcommerce', 'not-stage'],
-    ['no namespace', LIVE, '', 'not-stage'],
+    ['wrong environment', { ...LIVE, TARGET_DIAG_ENVIRONMENT: 'production' }, STAGE_NS, 'namespace-mismatch'],
+    ['wrong namespace', LIVE, '28538-wkndcommerce', 'namespace-mismatch'],
+    ['no namespace', LIVE, '', 'namespace-mismatch'],
+    ['missing expected namespace', { ...LIVE, TARGET_DIAG_STAGE_NAMESPACE: '' }, STAGE_NS, 'namespace-not-configured'],
+    ['overlapping environments', { ...LIVE, TARGET_DIAG_PRODUCTION_NAMESPACE: STAGE_NS }, STAGE_NS, 'namespace-overlap'],
     ['empty allowlist', { ...LIVE, TARGET_DIAG_SHOPPER_KEYS: '' }, STAGE_NS, 'not-configured'],
     ['no Auth0 audience', { ...LIVE, AUTH0_AUDIENCE: '' }, STAGE_NS, 'not-configured'],
   ])('%s → 404, nothing touched', async (_, config, ns, reason) => {
@@ -129,6 +222,7 @@ describe('disabled / unapproved configuration never touches storage, Auth0, the 
 
   test.each([
     ['linkage off', { TARGET_ID_LINKAGE_ENABLED: '' }, 'TARGET_ID_LINKAGE_ENABLED'],
+    ['no sanctioned wording', { TARGET_ID_LINKAGE_WORDING_VERSIONS: '' }, 'TARGET_ID_LINKAGE_WORDING_VERSIONS'],
     ['binding store not approved', { TARGET_ID_BINDING_STORE_APPROVED: 'false' }, 'TARGET_ID_BINDING_STORE_APPROVED'],
     ['ID Service calls not approved', { TARGET_ID_SERVICE_ENABLED: '' }, 'TARGET_ID_SERVICE_ENABLED'],
     ['bad org', { TARGET_ID_ORG_ID: 'org' }, 'TARGET_ID_ORG_ID'],
@@ -170,7 +264,7 @@ describe('disabled / unapproved configuration never touches storage, Auth0, the 
 
   test.each([
     ['linkage off', { TARGET_ID_LINKAGE_ENABLED: 'false' }, 'linkage-disabled'],
-    ['no approved wording (legal gate)', { TARGET_ID_LINKAGE_WORDING_VERSIONS: '' }, 'wording-not-approved'],
+    ['no operationally approved wording', { TARGET_ID_LINKAGE_WORDING_VERSIONS: '' }, 'wording-not-approved'],
   ])('a grant with %s is refused before storage', async (_, change, reason) => {
     const h = harness({ config: { ...LIVE, ...change } });
     const r = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token: await auth0Token() });
@@ -235,7 +329,7 @@ describe('identity: only verified, first-party, allowlisted shoppers; config is 
     expect(viaQuery.body.reason).toBe('disabled');
     expectUntouched(off);
     const prod = harness({ ns: '28538-wkndcommerce' });
-    expect((await prod.call({ op: 'decide' }, { token: await auth0Token(), extra: { __OW_NAMESPACE: STAGE_NS } })).body.reason).toBe('not-stage');
+    expect((await prod.call({ op: 'decide' }, { token: await auth0Token(), extra: { __OW_NAMESPACE: STAGE_NS } })).body.reason).toBe('namespace-mismatch');
     const h = harness();
     const r = await h.call({ op: 'decide', TARGET_ID_SERVICE_ENABLED: 'true', ecid: ECID }, { token: await auth0Token() });
     expect(r).toMatchObject({ statusCode: 400, body: { reason: 'invalid-request' } });
@@ -319,7 +413,7 @@ describe('consent operations and the inert decide flow', () => {
     const h = harness();
     await seedCustomer(h.store);
     const token = await auth0Token();
-    expect((await h.call({ op: 'consent-status' }, { token })).body).toEqual({ status: 'ok', consent: 'absent' });
+    expect((await h.call({ op: 'consent-status' }, { token })).body).toMatchObject({ status: 'ok', consent: 'absent' });
     const granted = await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
     expect(granted).toMatchObject({ statusCode: 200, body: { status: 'ok', consent: 'granted', changed: true } });
     const r = await h.call({ op: 'decide' }, { token });
@@ -359,7 +453,7 @@ describe('consent operations and the inert decide flow', () => {
     expect(r.body).toMatchObject({ status: 'unavailable', reason: 'consent-changed' });
     expect(r.body.marker).toBeUndefined();
     const w = await h.call({ op: 'consent', optIn: false }, { token });
-    expect(w.body).toEqual({ status: 'ok', consent: 'withdrawn', changed: false });
+    expect(w.body).toMatchObject({ status: 'ok', consent: 'withdrawn', changed: false });
   });
 
   test('reconsent during the Target request (new grantId): no stale marker', async () => {
@@ -381,7 +475,7 @@ describe('consent operations and the inert decide flow', () => {
     await h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
     await h.call({ op: 'decide' }, { token });
     expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
-    expect((await h.call({ op: 'consent', optIn: false }, { token })).body).toEqual({ status: 'ok', consent: 'withdrawn', changed: true });
+    expect((await h.call({ op: 'consent', optIn: false }, { token })).body).toMatchObject({ status: 'ok', consent: 'withdrawn', changed: true });
     expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([]);
   });
 

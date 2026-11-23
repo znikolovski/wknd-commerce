@@ -108,9 +108,9 @@ application:
             limits:
               timeout: 30000
               memorySize: 512
-          # Stage-only Target AAM diagnostic + ID-linkage consent (inert, no financial use). Every
-          # WKND_TARGET_* input is optional and deploys empty = OFF. The deploy gate refuses enabling it
-          # outside a -stage namespace; the action also refuses at runtime. docs/TARGET-AAM-DIAGNOSTIC.md
+          # Environment-bound Target AAM diagnostic + separate ID-linkage consent (no financial use).
+          # Optional inputs deploy empty = OFF; exact platform-verified namespace mapping is required.
+          # docs/TARGET-AAM-DIAGNOSTIC.md
           target-diagnostic:
             function: actions/target-diagnostic/index.js
             runtime: nodejs:22
@@ -120,6 +120,9 @@ application:
               AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
               TARGET_DIAG_ENABLED: $WKND_TARGET_DIAG_ENABLED
               TARGET_DIAG_ENVIRONMENT: $WKND_TARGET_DIAG_ENVIRONMENT
+              TARGET_DIAG_STAGE_NAMESPACE: $WKND_TARGET_DIAG_STAGE_NAMESPACE
+              TARGET_DIAG_PRODUCTION_NAMESPACE: $WKND_TARGET_DIAG_PRODUCTION_NAMESPACE
+              TARGET_DIAG_TARGET_CONFIG_APPROVED: $WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED
               TARGET_DIAG_ALLOWED_ORIGINS: $WKND_TARGET_DIAG_ALLOWED_ORIGINS
               TARGET_DIAG_SHOPPER_KEYS: $WKND_TARGET_DIAG_SHOPPER_KEYS
               TARGET_DIAG_TIMEOUT_MS: $WKND_TARGET_DIAG_TIMEOUT_MS

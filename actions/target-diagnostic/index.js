@@ -1,5 +1,5 @@
 /**
- * target-diagnostic — Stage-only, allowlisted Target AAM diagnostic and ID-linkage consent endpoint.
+ * target-diagnostic — environment-bound, allowlisted Target AAM diagnostic and ID-linkage consent endpoint.
  * Raw web action, `final` inputs; disabled unless every server gate is approved (see
  * lib/target-diagnostic-action.js and docs/TARGET-AAM-DIAGNOSTIC.md). No financial use.
  */

@@ -1,4 +1,4 @@
-# Target AAM diagnostic (Stage only) — inert runtime integration
+# Target AAM diagnostic (Stage / Production) — OFF by default
 
 Status: **implemented, inert, OFF by default. Not deployed.**
 - `actions/target-diagnostic` (manifest entry, deploy gate), `lib/target-diagnostic-action.js`,
@@ -7,12 +7,15 @@ Status: **implemented, inert, OFF by default. Not deployed.**
 - With the manifest defaults (every `WKND_TARGET_*` empty), the action answers 404 and touches
   nothing.
 - Nothing calls Target, Audience Manager or the ID Service until the live acceptance gates below are
-  approved and their flags are set for a Stage deploy.
-- Production is refused at deploy time and at runtime (environment and namespace).
+  verified and their flags are deliberately configured in the selected workspace.
+- Stage and Production are supported; neither is enabled by this change. Production approval is in
+  scope, not a blanket prohibition. No deployment, live calls or flag activation occurred.
+- Legal review is not a project prerequisite. Wording-version configuration requires operational-owner
+  approval, not an assertion of legal approval.
 
 ## What it asks and what the answer means
 
-- Isolated diagnostic activity (Form-based / API, Default Workspace), mbox
+- Existing **Stage** isolated diagnostic activity (Form-based / API, Default Workspace), mbox
   `wknd-aam-stage-eligibility-v1`, remote decisioning only (no on-device rules, no prefetch).
 - Experiences, in this order: AAM `27507404` → `climbing-planner`, AAM `27507403` →
   `climbing-interest`, All Visitors → `control`.
@@ -21,6 +24,13 @@ Status: **implemented, inert, OFF by default. Not deployed.**
 - Result: `wknd.target-aam-diagnostic-result/v1` `{status:'decided', marker}` or
   `{status:'unavailable', reason}`, plus `evidence:false`, `financialAuthorization:false`,
   `requestId` and `latencyMs`. It carries no identifiers.
+- Production uses only `wknd-aam-production-eligibility-v1` and offers with `environment:'production'`.
+  Stage activity **689010 must never be repurposed**. No Production activity has been created; its
+  future property, client, reporting configuration and separate activity need actual platform
+  verification before `WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED=true`. A syntactically valid token or
+  copied Stage property/client is not verification. A Stage mbox or Stage offer cannot become a
+  Production result. Every response (including consent/errors) carries the configured environment
+  (`null` if unconfigured), `evidence:false` and `financialAuthorization:false`.
 
 A decision is **not** audience evidence:
 
@@ -96,19 +106,22 @@ empty, which means OFF.**
 
 | # | Gate | Refusal | Never called on refusal |
 |---|---|---|---|
-| 1 | `TARGET_DIAG_ENABLED=true`, `TARGET_DIAG_ENVIRONMENT=stage`, a `-stage` namespace, Auth0 issuer/audience, a non-empty allowlist | 404 `disabled` / `not-stage` / `not-configured`, with no CORS headers | Auth0, store, ID Service, Target |
+| 1 | `TARGET_DIAG_ENABLED=true`, environment `stage` or `production`, exact namespace map match, Auth0 issuer/audience, a non-empty allowlist | 404 `disabled` / `invalid-environment` / `namespace-not-configured` / `namespace-mismatch` / `namespace-overlap` / `not-configured`, no CORS headers | Auth0, store, ID Service, Target |
 | 2 | No `X-WKND-Delegation` header. Delegated agents never grant. | 403 `delegated-not-allowed` | Auth0, store |
 | 3 | A valid Auth0 RS256 token (`lib/auth.js` `verifyToken`) | 401 `unauthenticated` | store |
 | 4 | `shopperKey(AUTH0_ISSUER, sub)` is allowlisted | 403 `not-allowlisted` | store |
 | 5 | A strict JSON body with a string op owned by the operation allowlist (no inherited names), containing only that op's fields | 400 `invalid-request` | store |
 | 6 | Grant: `TARGET_ID_LINKAGE_ENABLED=true` and the wording in `TARGET_ID_LINKAGE_WORDING_VERSIONS` | 403 `linkage-disabled` / `wording-not-approved` | store |
-| 7 | Decide: linkage enabled, `TARGET_ID_BINDING_STORE_APPROVED=true`, `TARGET_ID_SERVICE_ENABLED=true`, org, DPID, bounded `TARGET_ID_TIMEOUT_MS` / `TARGET_ID_LEASE_MS` / `TARGET_DIAG_TIMEOUT_MS`, Target client and property | 503 `not-approved` with the gate's **name** | store, ID Service, Target |
+| 7 | Decide: linkage enabled, nonempty approved wording versions, `TARGET_ID_BINDING_STORE_APPROVED=true`, `TARGET_ID_SERVICE_ENABLED=true`, org, DPID, bounded timeouts/lease, Target client/property; Production also `TARGET_DIAG_TARGET_CONFIG_APPROVED=true` | 503 `not-approved` with the gate's **name** | store, ID Service, Target |
 
 - **Deploy gate** (`lib/deploy-env.js`, the pre-app-deploy hook):
   - every `WKND_TARGET_*` input is optional;
   - each flag must be `true`, `false` or empty;
-  - any flag set to `true` outside a `-stage` namespace, or the diagnostic enabled without
-    `WKND_TARGET_DIAG_ENVIRONMENT=stage`, refuses the deploy.
+  - any enabled flag requires the selected environment's exact configured namespace;
+  - linkage enabled requires nonempty sanctioned wording versions;
+  - Production live decide inputs must pass the runtime decide gates, including verified Target config.
+  - This preflight is not platform verification. Runtime checks `process.env.__OW_NAMESPACE`
+    independently; body, query, caller namespace parameters and inferred suffixes are not authority.
 - **Package inputs.** Like every action in the `commerce` package, this one inherits the package-level
   inputs (`HLX_*`, `AEM_*` and so on). It never reads them: `CONFIG_KEYS` is an explicit allowlist.
 - **Responses and logs** carry fixed categories only: op, HTTP status, status, reason,
@@ -117,6 +130,38 @@ empty, which means OFF.**
   error is a 500 `internal`.
 - **Isolation.** Promotions, cart, orders, `shopper-audiences` and the GraphQL schema are untouched,
   and no Mesh change is needed.
+
+### Server and public frontend configuration contract
+
+New final manifest inputs (all `$WKND_*` references resolve empty when absent):
+
+| Input | Meaning |
+|---|---|
+| `WKND_TARGET_DIAG_STAGE_NAMESPACE` | Exact Stage namespace verified from the Adobe workspace/platform |
+| `WKND_TARGET_DIAG_PRODUCTION_NAMESPACE` | Exact Production namespace verified separately; must differ from Stage |
+| `WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED` | Empty/false by default; Production decide requires `true` after actual Target configuration verification |
+
+`WKND_TARGET_DIAG_ENVIRONMENT` selects the server-owned map entry, never an inferred namespace suffix.
+Both map entries may be configured; only the selected entry is required, and overlapping entries are
+refused. Before enabling either environment, the operator must verify both workspace identities and
+that each workspace's injected IMS credentials resolve to its **own** Database Storage instance.
+Do not point either workspace at the other's store or copy consent/customer/binding records.
+The collection names stay unchanged: their isolation boundary is the platform workspace and its
+injected DB credentials. Namespace-label configuration alone cannot prove backend isolation.
+Existing Stage behavior is unchanged **after adding its exact namespace input**; suffix-only Stage
+configurations deliberately fail closed until migrated.
+
+Frontend needs only an owner-configured endpoint URL, expected environment (`stage`/`production`),
+UI enabled flag (default false), sanctioned wording text/version and normal Auth0 audience/issuer.
+These are frontend settings, not new backend inputs. Never expose shopper allowlists, property tokens,
+org/DPID, credentials or namespace mappings as UI authority. No frontend files are changed here.
+Use POST + JSON + the signed-in shopper's Auth0 access token; no delegation header. Send only:
+`{op:'consent-status'}`, `{op:'consent',optIn:true,wordingVersion,source:'account-settings'}`,
+`{op:'consent',optIn:false,source:'account-settings'}` or `{op:'decide'}`.
+Never send environment/namespace/identity overrides. Reject results whose environment differs from
+the UI's expected environment; do not relabel them. Obtain a new token/status after account switch,
+clear displayed diagnostics on withdrawal/logout, and never use a marker to authorize money.
+Opt-in is separate and unchecked by default; display sanctioned wording, not bundled email consent.
 
 ### ID-linkage consent purpose (`lib/id-linkage-consent.js`)
 
@@ -277,7 +322,7 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 - the authoritative consent source;
 - the CAS binding-store adapter;
 - withdrawal call sites (shopper withdrawal and Brevo unsubscribe), with binding removal;
-- the Stage-only action and manifest entry;
+- the environment-bound action and final manifest entry;
 - the deploy gate;
 - strict wire parsing;
 - categorized errors;
@@ -285,17 +330,18 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 
 **Live acceptance gates.** These need approval or evidence, not code; each blocks enabling a flag.
 
-1. **Wording / legal.** Approve the ID-linkage consent wording and add its version to
-   `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. The storefront UI for the grant is not built; it would
-   call `op:'consent'` with the shopper's Auth0 token.
-2. **Backend CAS.** Approve the `target_id_bindings` collection, then verify on Stage App Builder
+1. **Operational wording.** The operational owner sanctions the ID-linkage wording and adds its
+   nonempty version to `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. Legal review is not a project gate.
+   The separately owned storefront UI calls `op:'consent'` with the shopper's Auth0 token.
+2. **Backend CAS.** Approve the `target_id_bindings` collection, then verify on each selected workspace's App Builder
    Database Storage that:
    - a duplicate `_id` insert fails;
    - `updateOne({_id, etag})` reports `matchedCount` 0 or 1;
    - `deleteOne` / `deleteMany` behave as expected;
    - a missing collection is a not-found error.
 
-   Then set `WKND_TARGET_ID_BINDING_STORE_APPROVED`.
+   Then set that workspace's `WKND_TARGET_ID_BINDING_STORE_APPROVED`. Use the disposable probe below;
+   a memory result is not Database Storage acceptance evidence.
 3. **Adobe ID Service call** (`WKND_TARGET_ID_SERVICE_ENABLED`):
    - `d_cid` with authenticated state 1 **transmits the authenticated DPUID to DCS**. Its side effects
      (DCS event, device-to-profile linking) must be accepted.
@@ -305,13 +351,39 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
    real time only**. There is no assurance that a server-minted ECID is ever evaluated under it. This
    must be proven by a live experiment, not inferred from daily reports or API permissions.
 5. **Upstream deletion.** Removing a binding locally does not delete the link Audience Manager already
-   holds. A Privacy Service or AAM deletion path is needed before personal data is linked.
-6. **Live qualification acceptance.** Activating activity 689010 and reading a real decision are
-   separate approvals. A decision is never evidence, and report absence is never negative.
+   holds. Establish an operator-owned supported workflow using [the runbook](TARGET-UPSTREAM-DELETION.md);
+   no automatic account erasure implementation is claimed.
+6. **Live qualification acceptance.** Stage activity 689010 remains Stage-only. Create and verify a
+   separate Production diagnostic activity/property/client before approving its Target config gate.
+   A decision is never evidence, and report absence is never negative.
 7. **Tuning.** The lease (default 10s) and timeouts (default 2s) are bounded configuration, not SLAs;
    measure them on Stage.
 
 There is no account erasure flow in the repository, and this PR does not invent one.
+
+### Disposable CAS verification runner (offline preparation)
+
+The runner uses `createBindingStore` unchanged: unique `_id` insertion, conditional `updateOne` /
+`matchedCount`, conditional `deleteOne` / `deletedCount`, stale writes/deletes, concurrent writers
+and delete/reinsert ABA. Cleanup is conditional and limited to a fresh disposable key; no customer,
+cart or order is accessed. It does not exercise `deleteMany` or missing-collection behavior: those
+still need separate platform acceptance evidence.
+
+```sh
+# Dry run: no store opened or writes (explicit fake namespaces, no secrets).
+node scripts/verify-target-binding-cas.mjs --environment=stage --namespace=mock-stage --stage-namespace=mock-stage --prefix=cas-probe-offline:
+# Memory-only verification, not a live CAS test.
+node scripts/verify-target-binding-cas.mjs --environment=production --namespace=mock-production --production-namespace=mock-production --prefix=cas-probe-offline: --memory
+```
+
+There is deliberately no live CLI mode, no .env loading or SDK initialization. `verifyTargetBindingCas`
+is an injectable runner for future operator-controlled execution: default `execute=false`; execution
+requires `execute:true`, a verified `platformNamespace` matching the selected map entry, a disposable
+`cas-probe-<name>:` prefix, and an explicitly injected `getStore`. Operators must independently obtain
+the correct platform namespace/credentials, authorize the disposable collection/key writes, review
+the integration and record backend results before enabling the store gate. Do not pass customer
+keys or infer workspace identity. On cleanup failure, stop and record the thrown error's `probeKey` securely;
+do not delete a collection or retry with an unconditional customer deletion.
 
 ## Reading Audience Manager reports (latency, not evidence)
 
@@ -355,6 +427,7 @@ These are Adobe's general guidelines, not SLAs.
   - The numeric workspace IDs differ (property 864785625, activity 26132544), which may be legacy or
     product-profile IDs. The token association itself is verified.
   - Activation is not approved.
-- Every live acceptance gate above is approved, and its flag is set only in the Stage `.env`.
-- A Stage deploy of the existing manifest entry is explicitly approved.
-- No Production deployment, customer/cart/order writes, emails or financial coupling.
+- Verify the exact namespace map and separate Database Storage credentials for the selected environment.
+- Verify the gates above before enabling any flags. Stage and Production scope approval is covered;
+  this implementation task does not deploy or activate either.
+- No live customer/cart/order writes, emails or financial coupling were performed by this task.

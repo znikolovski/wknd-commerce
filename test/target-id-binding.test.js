@@ -419,6 +419,7 @@ describe('diagnostic hand-off (adapter still inert by default)', () => {
   const params = {
     TARGET_DIAG_ENABLED: 'true',
     TARGET_DIAG_ENVIRONMENT: 'stage',
+    TARGET_DIAG_STAGE_NAMESPACE: '00000-example-stage',
     __OW_NAMESPACE: '00000-example-stage',
     TARGET_CLIENT_CODE: 'exampleclient',
     TARGET_PROPERTY_TOKEN: '11111111-2222-4333-8444-555555555555',

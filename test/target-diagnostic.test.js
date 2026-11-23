@@ -13,6 +13,8 @@ const KEY = shopperKey(ISSUER, SUB);
 const PARAMS = {
   TARGET_DIAG_ENABLED: 'true',
   TARGET_DIAG_ENVIRONMENT: 'stage',
+  TARGET_DIAG_STAGE_NAMESPACE: '00000-example-stage',
+  TARGET_DIAG_PRODUCTION_NAMESPACE: '00000-example-prod',
   __OW_NAMESPACE: '00000-example-stage',
   TARGET_CLIENT_CODE: 'exampleclient',
   TARGET_PROPERTY_TOKEN: '11111111-2222-4333-8444-555555555555',
@@ -43,8 +45,11 @@ const NEVER = [SUB, BINDING.ecid, BINDING.blob, KEY, PARAMS.TARGET_PROPERTY_TOKE
 describe('Target AAM diagnostic: configuration gate', () => {
   test.each([
     ['disabled', { TARGET_DIAG_ENABLED: 'false' }, 'disabled'],
-    ['Production environment', { TARGET_DIAG_ENVIRONMENT: 'production' }, 'not-stage'],
-    ['Production namespace', { __OW_NAMESPACE: '00000-example' }, 'not-stage'],
+    ['wrong environment', { TARGET_DIAG_ENVIRONMENT: 'production' }, 'namespace-mismatch'],
+    ['wrong namespace', { __OW_NAMESPACE: '00000-example' }, 'namespace-mismatch'],
+    ['missing namespace map', { TARGET_DIAG_STAGE_NAMESPACE: '' }, 'namespace-not-configured'],
+    ['overlapping namespaces', { TARGET_DIAG_PRODUCTION_NAMESPACE: PARAMS.TARGET_DIAG_STAGE_NAMESPACE }, 'namespace-overlap'],
+    ['unknown environment', { TARGET_DIAG_ENVIRONMENT: 'preview' }, 'invalid-environment'],
     ['missing client code', { TARGET_CLIENT_CODE: '' }, 'not-configured'],
     ['malformed property token', { TARGET_PROPERTY_TOKEN: 'abc' }, 'not-configured'],
     ['empty allowlist', { TARGET_DIAG_SHOPPER_KEYS: '' }, 'not-configured'],

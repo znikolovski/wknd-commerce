@@ -100,7 +100,7 @@ describe('deploy input check (fail closed)', () => {
     });
   });
 
-  describe('Stage-only Target diagnostic / ID linkage (off by default)', () => {
+  describe('Environment-bound Target diagnostic / ID linkage (off by default)', () => {
     const yaml = require('js-yaml');
     const action = () => yaml.load(manifests[0]).application.runtimeManifest.packages.commerce.actions['target-diagnostic'];
 
@@ -121,22 +121,46 @@ describe('deploy input check (fail closed)', () => {
 
     test.each([
       'WKND_TARGET_DIAG_ENABLED', 'WKND_TARGET_ID_LINKAGE_ENABLED', 'WKND_TARGET_ID_BINDING_STORE_APPROVED', 'WKND_TARGET_ID_SERVICE_ENABLED',
-    ])('%s=true outside a -stage namespace refuses the deploy (names only)', (flag) => {
+    ])('%s=true without an exact expected namespace refuses the deploy (names only)', (flag) => {
       const env = {
         ...COMPLETE, AIO_runtime_namespace: '28538-wkndcommerce', WKND_TARGET_DIAG_ENVIRONMENT: 'stage', [flag]: 'true',
       };
       const r = checkDeployEnv({ manifestTexts: manifests, env });
       expect(r.ok).toBe(false);
-      expect(r.errors.join('\n')).toContain(`${flag} may only be true in a -stage namespace`);
+      expect(r.errors.join('\n')).toContain('namespace-not-configured');
     });
 
-    test('flags accept only true, false or empty; enabling requires the stage environment', () => {
+    test('flags accept only true, false or empty; enabling requires an environment mapping', () => {
       expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_ID_SERVICE_ENABLED: 'yes' } }).ok).toBe(false);
       expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'true' } }).errors.join())
-        .toContain('requires WKND_TARGET_DIAG_ENVIRONMENT=stage');
-      const on = checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'true', WKND_TARGET_DIAG_ENVIRONMENT: 'stage' } });
+        .toContain('invalid-environment');
+      const on = checkDeployEnv({ env: {
+        ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'true', WKND_TARGET_DIAG_ENVIRONMENT: 'stage',
+        WKND_TARGET_DIAG_STAGE_NAMESPACE: COMPLETE.AIO_runtime_namespace,
+      } });
       expect(on).toMatchObject({ ok: true, targetDiagnostic: true });
       expect(checkDeployEnv({ env: { ...COMPLETE, WKND_TARGET_DIAG_ENABLED: 'false' } }).ok).toBe(true);
+    });
+
+    test('Production is permitted only with the mapped namespace; live decide needs verified Target config', () => {
+      const env = {
+        ...COMPLETE, AIO_runtime_namespace: 'example-runtime', WKND_TARGET_DIAG_ENVIRONMENT: 'production',
+        WKND_TARGET_DIAG_STAGE_NAMESPACE: 'example-other', WKND_TARGET_DIAG_PRODUCTION_NAMESPACE: 'example-runtime',
+        WKND_TARGET_DIAG_ENABLED: 'true',
+      };
+      expect(checkDeployEnv({ env }).ok).toBe(true);
+      expect(checkDeployEnv({ env: { ...env, AIO_runtime_namespace: 'example-other' } }).errors.join()).toContain('namespace-mismatch');
+      expect(checkDeployEnv({ env: { ...env, WKND_TARGET_DIAG_STAGE_NAMESPACE: 'example-runtime' } }).errors.join()).toContain('namespace-overlap');
+      const live = {
+        ...env, WKND_TARGET_ID_LINKAGE_ENABLED: 'true', WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS: 'owner-v1',
+        WKND_TARGET_ID_BINDING_STORE_APPROVED: 'true', WKND_TARGET_ID_SERVICE_ENABLED: 'true',
+        WKND_TARGET_ID_ORG_ID: '000000000000000000000000@AdobeOrg', WKND_TARGET_ID_DPID: '123',
+        WKND_TARGET_CLIENT_CODE: 'mockclient', WKND_TARGET_PROPERTY_TOKEN: '11111111-2222-4333-8444-555555555555',
+        WKND_TARGET_DIAG_SHOPPER_KEYS: 'offline-test-key',
+      };
+      expect(checkDeployEnv({ env: live }).errors.join()).toContain('WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED');
+      expect(checkDeployEnv({ env: { ...live, WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true' } }).ok).toBe(true);
+      expect(checkDeployEnv({ env: { ...live, WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS: '' } }).ok).toBe(false);
     });
   });
 

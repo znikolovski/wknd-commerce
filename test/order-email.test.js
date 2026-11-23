@@ -103,6 +103,28 @@ test('accepted mail with failed persistence remains sending then becomes unknown
   expect(sendEmail).toHaveBeenCalledTimes(1);
 });
 
+test('a concurrent stale pending snapshot cannot bypass a newly persisted rate-limit retry delay', async () => {
+  const { cat, cart } = await orderFixture();
+  await placeOrder(store, cat, cart, null);
+  const orders = store.collection('orders');
+  const update = orders.updateOne.bind(orders);
+  let release;
+  const deferred = new Promise((resolve) => { release = resolve; });
+  let claims = 0;
+  jest.spyOn(orders, 'updateOne').mockImplementation(async (filter, change, ...rest) => {
+    if (change.$set?.['emailConfirmation.state'] === 'sending') {
+      claims += 1;
+      if (claims === 2) await deferred;
+    }
+    const result = await update(filter, change, ...rest);
+    if (change.$set?.emailConfirmation?.state === 'pending') release();
+    return result;
+  });
+  sendEmail.mockRejectedValueOnce(new BrevoError('rate limit', { status: 429, ambiguous: false }));
+  await Promise.all([run(), run()]);
+  expect(sendEmail).toHaveBeenCalledTimes(1);
+});
+
 test('automatic defaults apply only to the real Production namespace', () => {
   const old = process.env.__OW_NAMESPACE;
   try {

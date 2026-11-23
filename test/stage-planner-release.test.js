@@ -1,4 +1,6 @@
-const { stagePlannerParams, STAGE_NAMESPACE } = require('../lib/stage-planner-release');
+const {
+  stagePlannerParams, STAGE_NAMESPACE, productionDemoEnabled,
+} = require('../lib/stage-planner-release');
 const { createStageLiveAudienceProvider } = require('../lib/stage-live-audience');
 const { loadPromotionRuntime } = require('../lib/promotions');
 const { createMemoryStore } = require('../lib/store');
@@ -17,6 +19,19 @@ test('ordinary builds stay OFF; request fields cannot supply the lexical release
   const request = { ...legacy, WKND_STAGE_PLANNER_RELEASE: release };
   expect(stagePlannerParams(request, STAGE_NAMESPACE)).toBe(request);
   expect(stagePlannerParams(legacy, STAGE_NAMESPACE, { enabled: false })).toBe(legacy);
+});
+
+test('Production requires a separate explicit approved release and exact platform namespace', () => {
+  const production = { enabled: true, productionDemo: true, parameters: {
+    TARGET_DIAG_ENVIRONMENT: 'production', TARGET_DIAG_PRODUCTION_NAMESPACE: '28538-wkndcommerce',
+    TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true',
+  } };
+  expect(productionDemoEnabled('28538-wkndcommerce', production)).toBe(true);
+  expect(productionDemoEnabled('28538-wkndcommerce', release)).toBe(false);
+  expect(productionDemoEnabled(STAGE_NAMESPACE, production)).toBe(false);
+  expect(productionDemoEnabled('28538-wkndcommerce', { ...production, productionDemo: false })).toBe(false);
+  expect(stagePlannerParams(legacy, '28538-wkndcommerce', production)).toMatchObject(legacy);
+  expect(stagePlannerParams(legacy, '28538-wkndcommerce', production)).not.toHaveProperty('STAGE_AAM_GENERAL_OFFERS_ENABLED');
 });
 
 test.each(['28538-wkndcommerce', 'another-stage', undefined])('approved release cannot enable %s', (namespace) => {

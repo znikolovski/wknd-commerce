@@ -13,55 +13,124 @@ export default function AudienceDraftPreview () {
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
   const [pending, setPending] = useState(false)
+  const [editing, setEditing] = useState(null)
+  const [items, setItems] = useState([])
+  const [nextAfter, setNextAfter] = useState(null)
+  const [createKey, setCreateKey] = useState(() => window.crypto?.randomUUID?.())
   const change = (setter) => (value) => { setter(value); setResult(null); setError(null) }
 
-  const preview = async () => {
+  const definition = () => ({
+    ...(editing?.promotion || {
+      mode: 'automatic', code: null, minimumMerchandiseMinor: null,
+      target: { kind: 'all' }, startsAt: null, endsAt: null
+    }),
+    name, enabled: false,
+    discount: editing?.promotion.discount.kind === 'fixed'
+      ? { kind: 'fixed', amountMinor: Math.round(percent * 100), currency: 'AUD' }
+      : { kind: 'percentage', basisPoints: Math.round(percent * 100) },
+    maxDiscountMinor: Number.isFinite(cap) ? Math.round(cap * 100) : null,
+    audienceRestriction: { environment: 'stage', key: audienceKey, version: 1 }
+  })
+
+  const request = async (method, args) => {
     setPending(true)
-    setResult(null)
     setError(null)
     try {
-      const data = await callAdmin(ims, 'promotions.previewAudienceDraft', {
-        environment: 'stage',
-        audienceKey,
-        promotion: {
-          name, enabled: false, mode: 'automatic', code: null,
-          discount: { kind: 'percentage', basisPoints: Math.round(percent * 100) },
-          maxDiscountMinor: Math.round(cap * 100), minimumMerchandiseMinor: null,
-          target: { kind: 'all' }, startsAt: null, endsAt: null, audienceRestriction: null
-        }
-      }, { endpoint: 'promotions' })
+      const data = await callAdmin(ims, `promotions.drafts.${method}`, args, { endpoint: 'promotions' })
       if (!data.ok) {
         const fields = (data.error?.fields || []).map((f) => `${f.path}: ${f.message}`).join('; ')
         setError(`${data.error?.message || 'Draft rejected.'}${fields ? ` ${fields}` : ''}`)
-      } else setResult(data)
+        return null
+      }
+      return data
     } catch (e) {
       setError(e.message)
+      return null
     } finally {
       setPending(false)
     }
   }
 
+  const open = (draft) => {
+    setEditing(draft)
+    setName(draft.promotion.name)
+    setAudienceKey(draft.promotion.audienceRestriction.key)
+    setPercent(draft.promotion.discount.kind === 'fixed' ? draft.promotion.discount.amountMinor / 100 : draft.promotion.discount.basisPoints / 100)
+    setCap(draft.promotion.maxDiscountMinor == null ? NaN : draft.promotion.maxDiscountMinor / 100)
+  }
+  const preview = async () => {
+    setResult(null)
+    const data = await request('validate', { promotion: definition() })
+    if (data) setResult(data)
+  }
+  const save = async () => {
+    setResult(null)
+    if (!editing && !createKey) {
+      setError('This browser cannot generate a secure draft request ID.')
+      return
+    }
+    const data = await request(editing ? 'update' : 'create', {
+      promotion: definition(),
+      ...(editing ? { id: editing.id, expectedRevision: editing.revision } : { idempotencyKey: createKey })
+    })
+    if (data) {
+      setResult(data)
+      open(data.draft)
+      setItems((current) => current.map((d) => d.id === data.draft.id ? data.draft : d))
+    }
+  }
+  const load = async (after) => {
+    const data = await request('list', { limit: 50, ...(after ? { after } : {}) })
+    if (data) {
+      setItems((current) => after ? [...current, ...data.items] : data.items)
+      setNextAfter(data.nextAfter)
+    }
+  }
+  const remove = async () => {
+    const data = await request('delete', { id: editing.id, expectedRevision: editing.revision })
+    if (data) {
+      setResult(data)
+      setItems((current) => current.filter((d) => d.id !== editing.id))
+      setEditing(null)
+      setCreateKey(window.crypto?.randomUUID?.())
+    }
+  }
+
   return (
     <View borderWidth='thin' borderColor='gray-300' borderRadius='medium' padding='size-250' marginBottom='size-300'>
-      <Heading level={2} marginTop={0}>Audience draft - fixture prototype</Heading>
+      <Heading level={2} marginTop={0}>Audience promotion drafts</Heading>
       <InlineAlert variant='info' marginBottom='size-200'>
         <Heading>Stage only. Activation blocked.</Heading>
-        <Content>Canonical AAM metadata, not membership evidence. This preview validates disabled draft terms only; it does not save a promotion, evaluate a shopper or authorize a discount. A verified provider is required before activation.</Content>
+        <Content>Canonical AAM metadata, not membership evidence. Disabled drafts can be saved without live eligibility. Draft storage is separate from active promotions; enabling and applying restricted offers remain blocked. No shopper evaluation or financial authorization.</Content>
       </InlineAlert>
-      <Form aria-label='Audience fixture draft' maxWidth='size-6000' isDisabled={pending} onSubmit={(e) => { e.preventDefault(); preview() }}>
+      <Form aria-label='Audience promotion draft' maxWidth='size-6000' isDisabled={pending} onSubmit={(e) => { e.preventDefault(); preview() }}>
         <TextField label='Draft name' value={name} onChange={change(setName)} isRequired maxLength={120} />
         <RadioGroup label='Canonical audience (Stage)' value={audienceKey} onChange={change(setAudienceKey)}>
           {audiences.map((a) => <Radio key={a.key} value={a.key}>{a.label} - AAM {a.segmentId}</Radio>)}
         </RadioGroup>
-        <NumberField label='Discount percentage' value={percent} onChange={change(setPercent)} minValue={0.01} maxValue={100} step={0.01} />
-        <NumberField label='Maximum discount (AUD)' value={cap} onChange={change(setCap)} minValue={0.01} step={0.01} />
-        <Text>Automatic offer, all products, disabled. Fixture output is separate from the live v1 definition, whose audienceRestriction remains null.</Text>
-        <Button variant='secondary' onPress={preview} isPending={pending} isDisabled={pending || !name.trim() || !Number.isFinite(percent) || !Number.isFinite(cap)}>
-          Validate fixture draft
+        <NumberField label={editing?.promotion.discount.kind === 'fixed' ? 'Fixed discount (AUD)' : 'Discount percentage'} value={percent} onChange={change(setPercent)} minValue={0.01} maxValue={editing?.promotion.discount.kind === 'fixed' ? 1000000 : 100} step={0.01} />
+        <NumberField label='Maximum discount (AUD, optional)' value={cap} onChange={change(setCap)} minValue={0.01} step={0.01} />
+        <Text>{editing ? `${editing.id}, revision ${editing.revision}. Other terms are preserved; see the full JSON.` : 'New automatic offer, all products, disabled. Financial activation is not available.'}</Text>
+        <Button variant='secondary' onPress={preview} isPending={pending} isDisabled={pending || !name.trim() || !Number.isFinite(percent)}>
+          Validate draft
         </Button>
+        <Button variant='accent' onPress={save} isDisabled={pending || !name.trim() || !Number.isFinite(percent)}>{editing ? 'Save draft changes' : 'Save disabled draft'}</Button>
+        {editing && <Button variant='negative' onPress={remove} isDisabled={pending}>Delete draft</Button>}
+        <Button variant='secondary' isDisabled={pending} onPress={() => {
+          setEditing(null); setName('Climbing audience demo'); setPercent(10); setCap(25); setResult(null); setError(null); setCreateKey(window.crypto?.randomUUID?.())
+        }}>New draft</Button>
       </Form>
-      {error && <InlineAlert variant='negative' marginY='size-200'><Heading>Draft preview failed</Heading><Content>{error}</Content></InlineAlert>}
-      {result && <TextArea label='Validated fixture JSON (not saved)' value={JSON.stringify(result, null, 2)} isReadOnly width='100%' height='size-3600' marginTop='size-200' />}
+      {error && <InlineAlert variant='negative' marginY='size-200'><Heading>Draft request failed</Heading><Content>{error}</Content></InlineAlert>}
+      {result && <TextArea label={result.persisted ? 'Saved draft JSON (not active)' : 'Validated draft JSON (not saved)'} value={JSON.stringify(result, null, 2)} isReadOnly width='100%' height='size-3600' marginTop='size-200' />}
+      <Button variant='secondary' onPress={() => load()} isDisabled={pending} marginTop='size-200'>Load saved drafts</Button>
+      {items.map((draft) => <View key={draft.id} marginTop='size-100'>
+        <Text>{draft.promotion.name} - {draft.promotion.audienceRestriction.key} - revision {draft.revision}</Text>
+        <Button variant='secondary' isDisabled={pending} onPress={async () => {
+          const data = await request('get', { id: draft.id })
+          if (data) { open(data.draft); setResult(data) }
+        }}>Open {draft.promotion.name}</Button>
+      </View>)}
+      {nextAfter && <Button variant='secondary' onPress={() => load(nextAfter)} isDisabled={pending}>Load more drafts</Button>}
     </View>
   )
 }

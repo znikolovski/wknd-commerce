@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>C02 Promotions - fixture authoring</title>
+  <title>C01 Promotions - draft authoring demo</title>
   <style>
     :root { font: 16px system-ui, sans-serif; color: #242424; background: #f5f5f5; }
     body { max-width: 1050px; margin: 40px auto; padding: 0 24px; }
@@ -23,9 +23,9 @@
 </head>
 <body>
   <header>
-    <span class="badge">C02 / Stage / Fixture prototype</span>
+    <span class="badge">C01 / Stage / Local memory demonstration</span>
     <h1>Promotions audience draft</h1>
-    <p class="note">Local preview of the admin/MCP draft validator. No live API, storage or shopper evaluation.</p>
+    <p class="note">Same draft service as admin/MCP. Simulated memory storage clears on restart; no live database, credentials or shopper evaluation.</p>
   </header>
   <main>
     <section>
@@ -38,20 +38,26 @@
         <select id="audience" required disabled><option value="">Loading catalogue...</option></select>
         <label for="percent">Discount percentage</label>
         <input id="percent" type="number" value="10" min="0.01" max="100" step="0.01" required>
-        <label for="cap">Maximum discount (AUD)</label>
-        <input id="cap" type="number" value="25" min="0.01" step="0.01" required>
+        <label for="cap">Maximum discount (AUD, optional)</label>
+        <input id="cap" type="number" value="25" min="0.01" step="0.01">
         <p class="note">Automatic offer. All products. Disabled draft. IDs are canonical metadata only, not membership evidence.</p>
-        <button id="validate" disabled>Validate fixture draft</button>
+        <button id="validate" disabled>Validate draft</button>
+        <button id="save" type="button" disabled>Save disabled draft</button>
+        <button id="delete" type="button" disabled>Delete selected draft</button>
+        <button id="new" type="button">New draft</button>
+        <label for="saved">Saved drafts (local memory only)</label>
+        <select id="saved"><option value="">Select a saved draft...</option></select>
+        <button id="load" type="button">Load saved drafts</button>
         </fieldset>
       </form>
       <p id="error" role="alert"></p>
     </section>
     <section>
       <h2>Activation blocked</h2>
-      <p class="note">No verified financial-eligibility provider. Draft authoring does not require one. This demo never saves or enables an offer.</p>
-      <p id="status" role="status">Select an audience and validate to see the fixture JSON.</p>
-      <pre id="result" aria-label="Validated fixture JSON"></pre>
-      <button id="download" type="button" hidden>Download fixture JSON</button>
+      <p class="note">No verified financial-eligibility provider. Disabled draft metadata can be stored without one. The draft collection is never read by pricing; this demo never enables or applies an offer.</p>
+      <p id="status" role="status">Select an audience and validate or save a disabled draft.</p>
+      <pre id="result" aria-label="Draft JSON"></pre>
+      <button id="download" type="button" hidden>Download draft JSON</button>
     </section>
   </main>
   <script>
@@ -63,7 +69,12 @@
     const validate = document.querySelector('#validate');
     const controls = document.querySelector('#controls');
     const download = document.querySelector('#download');
+    const save = document.querySelector('#save');
+    const remove = document.querySelector('#delete');
+    const saved = document.querySelector('#saved');
     let fixture = null;
+    let selectedDraft = null;
+    let createKey = crypto.randomUUID();
     function clearResult() {
       fixture = null; result.textContent = ''; download.hidden = true; error.textContent = '';
       status.textContent = 'Draft changed. Validate to refresh the preview.';
@@ -75,23 +86,36 @@
         if (!response.ok) throw new Error('Cannot load fixture catalogue.');
         const catalogue = await response.json();
         select.replaceChildren(...catalogue.audiences.map((a) => new Option(`${a.label} - AAM ${a.segmentId}`, a.key)));
-        select.disabled = false; validate.disabled = false;
+        select.disabled = false; validate.disabled = false; save.disabled = false;
       } catch (e) { error.textContent = e.message; }
     }
-    form.addEventListener('submit', async (event) => {
-      event.preventDefault(); clearResult(); controls.disabled = true;
+    function definition() {
+      return {
+        ...(selectedDraft?.promotion || { mode: 'automatic', code: null, minimumMerchandiseMinor: null, target: { kind: 'all' }, startsAt: null, endsAt: null }),
+        name: document.querySelector('#name').value, enabled: false,
+        discount: selectedDraft?.promotion.discount.kind === 'fixed'
+          ? { kind: 'fixed', amountMinor: Math.round(Number(document.querySelector('#percent').value) * 100), currency: 'AUD' }
+          : { kind: 'percentage', basisPoints: Math.round(Number(document.querySelector('#percent').value) * 100) },
+        maxDiscountMinor: document.querySelector('#cap').value ? Math.round(Number(document.querySelector('#cap').value) * 100) : null,
+        audienceRestriction: { environment: 'stage', key: select.value, version: 1 }
+      };
+    }
+    function openDraft(draft) {
+      selectedDraft = draft;
+      document.querySelector('#name').value = draft.promotion.name;
+      select.value = draft.promotion.audienceRestriction.key;
+      document.querySelector('#percent').value = draft.promotion.discount.kind === 'fixed' ? draft.promotion.discount.amountMinor / 100 : draft.promotion.discount.basisPoints / 100;
+      document.querySelector('#percent').max = draft.promotion.discount.kind === 'fixed' ? '1000000' : '100';
+      document.querySelector('label[for="percent"]').textContent = draft.promotion.discount.kind === 'fixed' ? 'Fixed discount (AUD)' : 'Discount percentage';
+      document.querySelector('#cap').value = draft.promotion.maxDiscountMinor == null ? '' : draft.promotion.maxDiscountMinor / 100;
+      save.textContent = 'Save draft changes'; remove.disabled = false;
+    }
+    async function request(method, args) {
+      clearResult(); controls.disabled = true;
       try {
-        const response = await fetch('/preview', {
+        const response = await fetch(`/drafts/${method}`, {
           method: 'POST', headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({
-            environment: 'stage', audienceKey: select.value,
-            promotion: {
-              name: document.querySelector('#name').value, enabled: false, mode: 'automatic', code: null,
-              discount: { kind: 'percentage', basisPoints: Math.round(Number(document.querySelector('#percent').value) * 100) },
-              maxDiscountMinor: Math.round(Number(document.querySelector('#cap').value) * 100),
-              minimumMerchandiseMinor: null, target: { kind: 'all' }, startsAt: null, endsAt: null, audienceRestriction: null
-            }
-          })
+          body: JSON.stringify(args)
         });
         const data = await response.json();
         if (!response.ok || !data.ok) {
@@ -99,14 +123,38 @@
           throw new Error(`${data.error?.message || data.error || 'Draft rejected.'} ${fields}`);
         }
         fixture = data; result.textContent = JSON.stringify(data, null, 2); download.hidden = false;
-        status.textContent = 'Validated fixture only. Not saved. No financial authorization.';
-      } catch (e) { error.textContent = e.message; status.textContent = 'Preview failed. No fixture created.'; }
+        status.textContent = data.persisted ? 'Saved draft metadata in local memory only. Not active.' : 'Validated draft. Not saved. No financial authorization.';
+        if (data.draft) openDraft(data.draft);
+        return data;
+      } catch (e) { error.textContent = e.message; status.textContent = 'Draft request failed. Read saved state before retrying changes.'; }
       finally { controls.disabled = false; }
+    }
+    form.addEventListener('submit', (event) => { event.preventDefault(); request('validate', { promotion: definition() }); });
+    save.addEventListener('click', () => request(selectedDraft ? 'update' : 'create', {
+      promotion: definition(),
+      ...(selectedDraft ? { id: selectedDraft.id, expectedRevision: selectedDraft.revision } : { idempotencyKey: createKey })
+    }));
+    remove.addEventListener('click', async () => {
+      if (!selectedDraft) return;
+      const data = await request('delete', { id: selectedDraft.id, expectedRevision: selectedDraft.revision });
+      if (data) { selectedDraft = null; createKey = crypto.randomUUID(); save.textContent = 'Save disabled draft'; remove.disabled = true; status.textContent = 'Draft deleted from local memory. No offer was changed.'; }
+    });
+    document.querySelector('#new').addEventListener('click', () => {
+      clearResult(); selectedDraft = null; createKey = crypto.randomUUID(); save.textContent = 'Save disabled draft'; remove.disabled = true;
+      document.querySelector('#name').value = 'Climbing audience demo'; document.querySelector('#percent').value = '10'; document.querySelector('#cap').value = '25';
+      document.querySelector('#percent').max = '100'; document.querySelector('label[for="percent"]').textContent = 'Discount percentage';
+    });
+    document.querySelector('#load').addEventListener('click', async () => {
+      const data = await request('list', { limit: 50 });
+      if (data) saved.replaceChildren(new Option('Select a saved draft...', ''), ...data.items.map((d) => new Option(`${d.promotion.name} - revision ${d.revision}`, d.id)));
+    });
+    saved.addEventListener('change', () => {
+      if (saved.value) request('get', { id: saved.value });
     });
     download.addEventListener('click', () => {
       if (!fixture) return;
       const url = URL.createObjectURL(new Blob([JSON.stringify(fixture, null, 2)], { type: 'application/json' }));
-      const link = document.createElement('a'); link.href = url; link.download = 'c02-audience-draft.fixture.json'; link.click();
+      const link = document.createElement('a'); link.href = url; link.download = 'c01-audience-draft.local-demo.json'; link.click();
       URL.revokeObjectURL(url);
     });
     loadCatalogue();

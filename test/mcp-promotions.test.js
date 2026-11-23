@@ -51,11 +51,30 @@ test('fixture authoring works with writes disabled and never persists; invalid S
     ok: true, mode: 'fixture', persisted: false, financialAuthorization: false,
     fixturePreview: { audience: { segmentId: '27507404' }, promotion: { enabled: false, audienceRestriction: null } },
   });
+
   const invalid = await call('preview_audience_promotion_draft', { ...input, environment: 'prod' });
   expect(invalid.tool.isError).toBe(true);
   expect(invalid.body.error.code).toBe('INVALID_DRAFT');
   expect((await call('list_promotion_authoring_audiences', {})).body.audiences).toHaveLength(2);
   expect(await store.collection('promotion_requests').countDocuments({})).toBe(0);
+  expect(await store.collection('promotions').countDocuments({ name: 'Gear deal' })).toBe(0);
+  expect(await store.collection('promotion_effects').countDocuments({})).toBe(0);
+});
+
+test('versioned restricted draft CRUD persists with financial writes off but never enables or creates a live offer', async () => {
+  const promotion = {
+    ...definition(), enabled: false,
+    audienceRestriction: { environment: 'stage', key: 'climbing-planner', version: 1 },
+  };
+  const input = { idempotencyKey: randomUUID(), promotion };
+  const { body: created } = await call('create_audience_promotion_draft', input, { MCP_PROMOTION_WRITES_ENABLED: undefined });
+  expect(created).toMatchObject({ apiVersion: 'wknd.promotion-drafts/v2', ok: true, persisted: true, financialAuthorization: false, draft: { revision: 1 } });
+  expect((await call('get_audience_promotion_draft', { id: created.draft.id })).body.draft).toEqual(created.draft);
+  const enabled = await call('update_audience_promotion_draft', {
+    id: created.draft.id, expectedRevision: 1, promotion: { ...created.draft.promotion, enabled: true },
+  });
+  expect(enabled.tool.isError).toBe(true);
+  expect(enabled.body.error.code).toBe('RESTRICTED_ACTIVATION_BLOCKED');
   expect(await store.collection('promotions').countDocuments({ name: 'Gear deal' })).toBe(0);
   expect(await store.collection('promotion_effects').countDocuments({})).toBe(0);
 });

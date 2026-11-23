@@ -1,9 +1,13 @@
 import http from 'node:http';
 import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import authoring from '../lib/promotion-authoring.js';
+import drafts from '../lib/promotion-drafts.js';
+import storage from '../lib/store.js';
 
 const page = await readFile(new URL('../src/dx-excshell-1/web-src/promotion-authoring-preview.html', import.meta.url));
+const service = drafts.createPromotionDraftService({ store: storage.createMemoryStore() });
 const port = Number(process.env.PORT || 4178);
 const server = http.createServer(async (req, res) => {
   const send = (status, body, type = 'application/json') => {
@@ -12,7 +16,8 @@ const server = http.createServer(async (req, res) => {
   };
   if (req.method === 'GET' && req.url === '/') return send(200, page, 'text/html');
   if (req.method === 'GET' && req.url === '/audiences') return send(200, authoring.authoringCatalogue());
-  if (req.method !== 'POST' || req.url !== '/preview') return send(404, { error: 'Unknown fixture route.' });
+  const method = /^\/drafts\/(validate|create|get|list|update|delete)$/.exec(req.url)?.[1];
+  if (req.method !== 'POST' || (!method && req.url !== '/preview')) return send(404, { error: 'Unknown local preview route.' });
   let raw = '';
   try {
     for await (const chunk of req) {
@@ -25,7 +30,12 @@ const server = http.createServer(async (req, res) => {
     } catch {
       return send(400, { error: 'Fixture request must be JSON.' });
     }
-    const result = authoring.previewAudienceDraft(args);
+    const result = method
+      ? { ...await service[method]({
+        actor: { kind: 'integration', subject: 'local-preview', orgId: 'local-preview' },
+        correlationId: randomUUID(),
+      }, args), localSimulation: true, storage: 'memory-cleared-on-restart' }
+      : authoring.previewAudienceDraft(args);
     return send(result.ok ? 200 : 400, result);
   } catch (error) {
     console.error('Fixture preview failed:', error.message);
@@ -33,7 +43,7 @@ const server = http.createServer(async (req, res) => {
   }
 });
 server.listen(port, '127.0.0.1', () => {
-  console.log(`C02 fixture preview: http://127.0.0.1:${port} (local only; no store, credentials or providers)`);
+  console.log(`C01/C02 local preview: http://127.0.0.1:${port} (simulated memory storage clears on restart; no live DB, credentials or providers)`);
 });
 server.on('error', (error) => {
   console.error(`Cannot start ${fileURLToPath(import.meta.url)}: ${error.message}`);

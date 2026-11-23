@@ -1,0 +1,26 @@
+[
+  {
+    "key": "climbing-interest",
+    "label": "Climbing Interest",
+    "env": "stage",
+    "version": 1,
+    "provider": "aam",
+    "segmentId": "27507403",
+    "status": "draft",
+    "transport": "unverified",
+    "sourceDpid": "1547309",
+    "mergeRuleId": "1547344"
+  },
+  {
+    "key": "climbing-planner",
+    "label": "Climbing Planner",
+    "env": "stage",
+    "version": 1,
+    "provider": "aam",
+    "segmentId": "27507404",
+    "status": "draft",
+    "transport": "unverified",
+    "sourceDpid": "1547309",
+    "mergeRuleId": "1547344"
+  }
+]

@@ -80,7 +80,7 @@ test('SDK handles initialize, notifications, list and protocol failures without 
   expect((await invoke({ jsonrpc: '2.0', method: 'notifications/initialized' })).statusCode).toBe(202);
   const listed = JSON.parse((await invoke(rpc('tools/list'))).body).result.tools;
   expect(listed.map((t) => t.name)).toContain('set_product_sale');
-  expect(listed.some((t) => /delete|import|inventory_update|place_order/.test(t.name))).toBe(false);
+  expect(listed.filter((t) => /delete|import|inventory_update|place_order/.test(t.name)).map((t) => t.name)).toEqual(['delete_audience_promotion_draft']);
   expect(listed.find((t) => t.name === 'set_product_sale').annotations.destructiveHint).toBe(true);
   expect(JSON.parse((await invoke(rpc('admin'))).body).error.code).toBe(-32601);
   expect(openStore).not.toHaveBeenCalled();
@@ -156,7 +156,12 @@ test('official SDK client can initialize/list/read/write through raw Runtime ada
   });
   try {
     await client.connect(transport);
-    expect((await client.listTools()).tools.length).toBe(16);
+    const listed = (await client.listTools()).tools;
+    expect(listed.length).toBe(24);
+    expect(listed.find((tool) => tool.name === 'preview_audience_promotion_draft')).toMatchObject({
+      annotations: { readOnlyHint: true, destructiveHint: false },
+      inputSchema: { properties: { environment: { const: 'stage' } } },
+    });
     const read = await client.callTool({ name: 'get_product', arguments: { sku: 'GEAR-ONE' } });
     expect(JSON.parse(read.content[0].text).prices[0].regular).toBe(100);
     const write = await client.callTool({ name: 'set_product_sale', arguments: { sku: 'GEAR-ONE', amountMinor: 7500 } });

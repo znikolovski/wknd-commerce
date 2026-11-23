@@ -206,12 +206,12 @@ default off, never inferred from sign-in or checkout). Safety defaults:
   Production fallback: a missing URL refuses execution before provider calls and leaves the run
   approved. Production must use `https://wknd-adventures.run.place/shop/cart`. Stage must use a
   storefront actually configured for Stage Commerce, not merely an EDS preview hostname.
-  For a local Stage-configured server on port 3000, a rendered example is
-  `http://localhost:3000/shop/cart?utm_source=brevo&utm_medium=email&utm_campaign=wknd-cart-recovery-2026`.
-  This fixture link is only usable on the demo machine while that server is running; it is not
-  evidence of a published Stage storefront. Confirm the real Stage URL before configuring or
-  deploying the worker. Do not reuse `WKND_SITE_ORIGIN`, which is also used for canonical product
-  links and currently names Production in the Stage checkout.
+  The intended Stage destination is
+  `https://feat-aam-stage-pilot--masterclass-demo--znikolovski.aem.page/shop/cart`, but its Commerce
+  configuration currently points to Production. Keep Stage `WKND_SHOP_CART_URL` unconfigured
+  until dedicated Stage routing is published and verified by its owner. Tests and offline
+  template examples do not establish runtime acceptance. Do not reuse `WKND_SITE_ORIGIN`,
+  which is also used for canonical product links.
 
 Actions:
 

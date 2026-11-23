@@ -155,7 +155,7 @@ describe('execution', () => {
   });
 
   test.each([
-    ['Stage local storefront', 'http://localhost:3000/shop/cart'],
+    ['intended Stage storefront (offline fixture)', 'https://feat-aam-stage-pilot--masterclass-demo--znikolovski.aem.page/shop/cart'],
     ['Production', 'https://wknd-adventures.run.place/shop/cart'],
   ])('worker uses the configured %s cart link with campaign attribution only', async (_environment, cartUrl) => {
     await enableOffer();

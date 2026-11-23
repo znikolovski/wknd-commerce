@@ -137,6 +137,29 @@ Rotation is prepared, then activated in one coordinated step:
 3. **Verify.** A Production-signed assertion is refused by Stage. Production is never called with
    a Stage assertion.
 
+### Rotating a live key without a gap (rotation overlap)
+
+`MCP_DELEGATION_SECRET_PREVIOUS` (`$WKND_MCP_DELEGATION_SECRET_PREVIOUS`) is an optional second key,
+accepted only while set. Empty or undeclared means single-key behaviour. The deploy check refuses a
+previous key that equals the current one, is shorter than 32 bytes, or has no current key, and it
+prints only `delegationOverlap=true|false`. Claim, scope, lifetime and `jti` replay checks are the same
+for both keys, so a `jti` is accepted once across both.
+
+1. **Prepare.** Generate the new value into a mode-600 file and stage it as the unmapped
+   `WKND_MCP_DELEGATION_SECRET_NEXT` in that environment's deploy `.env`. Edit `.env` files with a
+   parser (never `source` them in a shell; error output can print values).
+2. **Commerce: accept both.** Set `WKND_MCP_DELEGATION_SECRET` to the new value and
+   `WKND_MCP_DELEGATION_SECRET_PREVIOUS` to the old one, deploy actions only. Verify both keys
+   are accepted and the other environment's key is refused.
+3. **Signer: switch.** The LLM app sets `WKND_COMMERCE_ASSERTION_SECRET` to the new value (without
+   reading it back) and redeploys that environment.
+4. **Commerce: drop the old key.** Clear `WKND_MCP_DELEGATION_SECRET_PREVIOUS`, deploy actions only.
+   Verify the old key is refused and the new key is accepted. Remove the old value from every other
+   checkout that could deploy to that namespace.
+
+Rollback: step 2, redeploy the previous action versions; step 3, the signer restores the old value
+(still accepted); step 4, set the previous key again only while the signer still uses it.
+
 ## Activation order
 
 1. `node scripts/migrate-promotions.mjs --verify-storage` (prove unique `_id` + conditional update).

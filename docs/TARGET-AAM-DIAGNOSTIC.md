@@ -1,4 +1,4 @@
-# Target AAM diagnostic (Stage / Production) — OFF by default
+#  Target AAM diagnostic (Stage / Production) — OFF by default
 
 Status: **implemented, inert, OFF by default. Not deployed.**
 - `actions/target-diagnostic` (manifest entry, deploy gate), `lib/target-diagnostic-action.js`,
@@ -14,6 +14,38 @@ Status: **implemented, inert, OFF by default. Not deployed.**
   approval, not an assertion of legal approval.
 
 ## What it asks and what the answer means
+
+### Public person-binding source contract (not live approval)
+
+The raw web action `commerce/target-diagnostic` accepts authenticated POSTs with
+`{op:"person-binding"}`, `{op:"person-status"}` or `{op:"person-withdrawal"}`.
+The existing verified Auth0 bearer, exact Runtime environment, shopper allowlist
+and direct-shopper-only checks apply. No caller alias or grant is accepted.
+`person-status` reads only; `person-binding` atomically creates a stable random
+`wpa_` plus 32 lowercase hex person alias in `person_aliases_v1`, scoped by
+verified issuer/shopper and environment. It never substitutes an ECID or exposes
+the Auth0 subject. Source approval additionally requires
+`WKND_TARGET_PERSON_ALIAS_APPROVED=true`; it defaults OFF.
+
+Responses use `apiVersion:"wknd.person-binding/v1"`, `status`, `consent`,
+`binding` and `semanticAllowlist:[]`, plus the existing environment/evidence/
+financialAuthorization envelope. A granted binding contains `source:"server-issued"`,
+`personAlias`, `environment`, `runtimeNamespace`, `orgId`, `dpid`,
+`namespace:"wkndCustomerId"`, `issuer` (this action's HTTPS URL),
+`consentGeneration`, `issuedAt`, `expiresAt` and `freshnessMs:300000`.
+Expiry is exclusive, five minutes after issuance, and is NOT membership expiry.
+Refresh before use; the server checks the authoritative consent generation and
+stored mapping, not a client-provided DTO. Repeated issuance uses the same mapping;
+withdrawal is naturally idempotent and never grants consent. Withdrawal returns
+`binding:null`, `revoked:true`, `upstreamDeletionConfirmed:false`; no AAM deletion,
+membership migration or device reset is claimed.
+
+When explicitly approved, Target binding uses this same mapping as its declared
+ID. Existing raw-sub bindings are retained as retirement-pending, never silently
+relinked or claimed migrated. The AAM collection adapter and canonical semantic
+rule mappings are **missing**: `person-event` returns 503
+`canonical-rule-unavailable`; no semantic names or args are approved.
+Neither navigation nor quiz completion is rewritten as a page view.
 
 - Existing **Stage** isolated diagnostic activity (Form-based / API, Default Workspace), mbox
   `wknd-aam-stage-eligibility-v1`, remote decisioning only (no on-device rules, no prefetch).

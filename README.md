@@ -125,8 +125,10 @@ TRAILREADY's below-AUD200 acceptance with zero saving. A retained explicit legac
 suppresses automatic promotions; exactly AUD200 saves AUD20. New coupons do not inherit
 this exception. The five-minute non-web promotion worker settles durable requests/effects.
 The optional Brevo webhook only records suppression, requires its separate bearer secret,
-and does not send emails. Recovery email sends remain separately approval-gated and are
-not part of this MCP.
+and does not send emails. Recovery sends retain consent/suppression/pause and financial-policy
+guards; Production's explicitly approved five-minute automation no longer needs individual manual
+runs. New durable orders also queue transactional receipts independent of marketing consent.
+See [Production email operations](docs/PROMOTIONS.md#production-automatic-email-and-transactional-order-receipts).
 
 Run `node scripts/smoke-mcp.mjs` for a local official-SDK HTTP handshake/list/read check.
 After approved deployment, `node scripts/smoke-mcp.mjs https://YOUR-DEPLOYED-MCP-URL` uses

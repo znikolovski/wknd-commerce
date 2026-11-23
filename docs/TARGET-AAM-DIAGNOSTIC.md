@@ -184,6 +184,36 @@ None of the existing consent purposes may back this interface. `marketing.recove
 
 None of these are implemented here. The provider remains unconfigured by default.
 
+## Reading Audience Manager reports (latency, not evidence)
+
+Reports are a coarse, delayed confirmation of whether the AAM setup works for the pilot. They are not
+qualification evidence for any shopper, and they never authorize money. Sources:
+[qualification reference](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/features/traits/trait-and-segment-qualification-reference)
+and [reporting timeframes](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/reference/reporting-file-transfer-timeframe).
+These are Adobe's general guidelines, not SLAs.
+
+**Latency**
+
+| Event | Earliest visibility |
+|---|---|
+| A rule-based trait is created | Users start qualifying about 4h later. Activity before that is not expected to qualify. |
+| A qualification on UTC day D | Real-time Segment Population / Unique Trait Realizations on day D+1. Today's real-time figure covers yesterday, 00:00–23:59:59 UTC. |
+| The same qualification | Total Segment / Trait Population is a further 24h behind the real-time figure, so D+2 at the earliest. |
+| General Reports | Usually updated by 18:00 UTC daily, not guaranteed. |
+| Onboarded (file-ingested) data | Up to 48h from upload to reporting and activation. |
+
+**Interpretation rules**
+
+- An empty or zero report is **inconclusive**, never negative. This applies:
+  - on the qualification day;
+  - for a Total population before D+2;
+  - before that day's General Reports have updated;
+  - within 48h of an inbound file.
+- A non-zero population confirms that *some* device or profile qualified. It does not confirm that
+  any particular shopper qualified, it is not `complete:true`, and it is not a merge-rule result. It
+  cannot feed `shopper-audiences`, promotions or the diagnostic result.
+- Reports are read only, by the coordinator. Nothing in this repository reads, stores or acts on them.
+
 ## Activation prerequisites
 
 - Target configuration is confirmed read-only.

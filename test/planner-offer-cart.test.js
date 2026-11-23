@@ -116,3 +116,13 @@ test('selection change advances the reviewed cart version; stable reads and conc
   expect(() => assertCartVersion(actual, version)).toThrow(expect.objectContaining({ code: 'CART_CHANGED' }));
   expect((await read()).data.cart.wknd_cart_version).toBe(lost.data.cart.wknd_cart_version);
 });
+
+test('ordinary OFF code rollback reconciles pricing/version even with absent Target settings', async () => {
+  const initial = await read();
+  const version = initial.data.cart.wknd_cart_version;
+  const off = { STAGE_AAM_GENERAL_OFFERS_ENABLED: '', TARGET_DIAG_ENVIRONMENT: '', TARGET_DIAG_STAGE_NAMESPACE: '' };
+  const rolledBack = await read(off);
+  expect(rolledBack.data.cart.prices.discounts).toEqual([]);
+  expect(rolledBack.data.cart.wknd_cart_version).not.toBe(version);
+  expect((await read(off)).data.cart.wknd_cart_version).toBe(rolledBack.data.cart.wknd_cart_version);
+});

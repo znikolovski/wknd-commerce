@@ -10,7 +10,7 @@ const CATALOG = require('../data/catalog.json');
 
 const SUB = 'auth0|synthetic-planner-cart';
 const ISSUER = 'https://example.auth0.com/';
-const NS = 'example-stage';
+const NS = '28538-wkndcommerce-stage';
 const GRANT = '11111111-2222-4333-8444-555555555555';
 const FIELDS = 'kind status coupon_code percent_off max_discount { value currency } saving { value currency } current_saving { value currency } expires_at message';
 const QUERY = `query($id:String!) {
@@ -115,4 +115,14 @@ test('selection change advances the reviewed cart version; stable reads and conc
   const actual = await store.collection('carts').findOne({ id: cart.id });
   expect(() => assertCartVersion(actual, version)).toThrow(expect.objectContaining({ code: 'CART_CHANGED' }));
   expect((await read()).data.cart.wknd_cart_version).toBe(lost.data.cart.wknd_cart_version);
+});
+
+test('ordinary OFF code rollback reconciles pricing/version even with absent Target settings', async () => {
+  const initial = await read();
+  const version = initial.data.cart.wknd_cart_version;
+  const off = { STAGE_AAM_GENERAL_OFFERS_ENABLED: '', TARGET_DIAG_ENVIRONMENT: '', TARGET_DIAG_STAGE_NAMESPACE: '' };
+  const rolledBack = await read(off);
+  expect(rolledBack.data.cart.prices.discounts).toEqual([]);
+  expect(rolledBack.data.cart.wknd_cart_version).not.toBe(version);
+  expect((await read(off)).data.cart.wknd_cart_version).toBe(rolledBack.data.cart.wknd_cart_version);
 });

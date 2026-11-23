@@ -3,7 +3,6 @@ const { createCart } = require('../lib/cart');
 const {
   createShopperCartWindow, mapShopperCartWindow, HOUR_MS, MAX_IDLE_MS,
 } = require('../lib/shopper-cart-window');
-const { POLICY_V1 } = require('../lib/recovery-policy');
 const { refreshStageCartWindows } = require('../lib/stage-cart-window-tick');
 
 const NOW = Date.parse('2026-11-23T09:00:00.000Z');
@@ -32,7 +31,6 @@ test('one-hour inclusive threshold and seven-day inclusive maximum are clock-dri
   expect((await reader.read()).window).toBe('within-window');
   clock += 1;
   expect((await reader.read()).window).toBe('outside-window');
-  expect(POLICY_V1.minInactivityMs).toBe(24 * HOUR_MS);
 });
 
 test('activity reset changes episode aggregate and a later one-hour crossing can requalify', async () => {

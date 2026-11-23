@@ -157,8 +157,18 @@ for both keys, so a `jti` is accepted once across both.
    Verify the old key is refused and the new key is accepted. Remove the old value from every other
    checkout that could deploy to that namespace.
 
-Rollback: step 2, redeploy the previous action versions; step 3, the signer restores the old value
-(still accepted); step 4, set the previous key again only while the signer still uses it.
+Rollback. While the overlap is deployed, both keys are accepted, so a signer on either key keeps
+working. Never remove the overlap until the signer runs on the new key and a signed-in read with it
+is verified.
+
+- **Before the signer switches** (it still signs with the old key): restore the old value as
+  `WKND_MCP_DELEGATION_SECRET` and clear `WKND_MCP_DELEGATION_SECRET_PREVIOUS`, then deploy actions
+  only. Only after that, if needed, revert the verifier code to the previous action versions. Do not
+  redeploy previous action versions while the current key is still the new one: the old signer
+  would be refused.
+- **After the signer switches**: roll the signer back to the old value while the overlap still
+  accepts both keys, verify, then restore the old current key as above.
+- **After step 4**: set the previous key again only if the signer still uses it.
 
 ## Activation order
 

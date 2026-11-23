@@ -121,6 +121,7 @@ test('public person contract never issues an alias or consent by default', async
   const result = await h.call({ op: 'person-binding' }, { token });
   expect(result).toMatchObject({
     statusCode: 503,
+    headers: { 'Cache-Control': 'no-store' },
     body: { apiVersion: 'wknd.person-binding/v1', binding: null, reason: 'alias-not-approved', semanticAllowlist: [] },
   });
   expect(h.fetchImpl).not.toHaveBeenCalled();

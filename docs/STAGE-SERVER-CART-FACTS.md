@@ -68,3 +68,16 @@ References:
 - [Supported DCS attributes](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/api-and-sdk-code/dcs/dcs-api-reference/dcs-keys)
 - [CID identity transport](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/reference/cid)
 - [CURRENT/NONE profile semantics](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/features/profile-merge-rules/merge-rule-definitions)
+# Production facts-only composition
+
+The same publisher can be released under exact `28538-wkndcommerce` only with the explicit
+Production demo release, approved Production Target configuration, and `factsOnly:true`.
+Its existing v1 fields below use **`c_wknd_production_`**, never `c_wknd_stage_`; the packet and
+opaque episode hash use `environment:"production"`. Its verified Production workspace credential
+and binding/grant storage are separate from Stage. Existing canonical source1547309 is shared by
+coordinator-approved identity configuration; these cart facts do not synthesize canonical
+page-view/category/planning signals or audience/financial qualifications.
+The one-hour aggregate timer remains **Stage-only**, including when accidentally configured in a
+Production release. Ordinary builds and unapproved namespaces remain OFF. Production per-cart
+facts use the same consent/generation, complete-order reads, freshness/CAS, merge retirement and
+transport-ACK guards; optional unknown data is never false/zero. No new Runtime inputs are needed.

@@ -54,6 +54,37 @@ beforeEach(async () => {
 });
 afterEach(() => jest.useRealTimers());
 
+test('Production facts use their own verified namespace, per-environment opaque episode and wire keys', async () => {
+  const production = make({
+    namespace: '28538-wkndcommerce', windowEnabled: true,
+    params: { ...params, TARGET_DIAG_ENVIRONMENT: 'production',
+      TARGET_DIAG_PRODUCTION_NAMESPACE: '28538-wkndcommerce', TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true' },
+  });
+  const stageEpisode = (await createServerCartFacts({ store, claims: { sub: SUB }, environment: 'stage', clock: () => NOW })
+    .read(cart.id)).episode.key;
+  expect(await production.handoff(cart.id)).toEqual({ status: 'acknowledged' });
+  const signal = new URL(fetchImpl.mock.calls[0][0]);
+  expect(signal.searchParams.get('c_wknd_production_environment')).toBe('production');
+  expect(signal.searchParams.get('c_wknd_production_purchase_since_last_activity')).toBe('not-recorded');
+  expect(signal.searchParams.get('c_wknd_production_episode_key')).not.toBe(stageEpisode);
+  expect([...signal.searchParams.keys()].some(key => key.startsWith('c_wknd_stage_'))).toBe(false);
+  expect(fetchImpl).toHaveBeenCalledTimes(1); // The Stage-only timer is never enabled in Production.
+  expect(await production.refreshWindow()).toEqual({ status: 'disabled' });
+});
+
+test('Production fact collection rejects missing approval, wrong namespace and cross-environment packet mapping', async () => {
+  for (const change of [{ TARGET_DIAG_TARGET_CONFIG_APPROVED: 'false' }, { TARGET_DIAG_PRODUCTION_NAMESPACE: STAGE_NAMESPACE }]) {
+    const invalid = make({ namespace: '28538-wkndcommerce', params: {
+      ...params, TARGET_DIAG_ENVIRONMENT: 'production', TARGET_DIAG_PRODUCTION_NAMESPACE: '28538-wkndcommerce',
+      TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true', ...change,
+    } });
+    expect(await invalid.handoff(cart.id)).toEqual({ status: 'disabled' });
+  }
+  const packet = await createServerCartFacts({ store, claims: { sub: SUB }, environment: 'stage', clock: () => NOW }).read(cart.id);
+  expect(() => mapStageCartFacts(packet, 'production')).toThrow();
+  expect(fetchImpl).not.toHaveBeenCalled();
+});
+
 test('scheduled refresh emits owner aggregate at one hour without a request, never mints and retains consent guards', async () => {
   const tick = () => refreshStageCartWindows({
     enabled: true, store, params, namespace: STAGE_NAMESPACE, fetchImpl, now: () => NOW,

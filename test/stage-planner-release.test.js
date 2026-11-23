@@ -1,5 +1,5 @@
 const {
-  stagePlannerParams, STAGE_NAMESPACE, productionDemoEnabled,
+  stagePlannerParams, STAGE_NAMESPACE, productionDemoEnabled, stageFactsEnabled, stageWindowEnabled,
 } = require('../lib/stage-planner-release');
 const { createStageLiveAudienceProvider } = require('../lib/stage-live-audience');
 const { loadPromotionRuntime } = require('../lib/promotions');
@@ -32,6 +32,10 @@ test('Production requires a separate explicit approved release and exact platfor
   expect(productionDemoEnabled('28538-wkndcommerce', { ...production, productionDemo: false })).toBe(false);
   expect(stagePlannerParams(legacy, '28538-wkndcommerce', production)).toMatchObject(legacy);
   expect(stagePlannerParams(legacy, '28538-wkndcommerce', production)).not.toHaveProperty('STAGE_AAM_GENERAL_OFFERS_ENABLED');
+  expect(stageFactsEnabled('28538-wkndcommerce', production)).toBe(false);
+  const facts = { ...production, factsOnly: true, cartWindow: true };
+  expect(stageFactsEnabled('28538-wkndcommerce', facts)).toBe(true);
+  expect(stageWindowEnabled('28538-wkndcommerce', facts)).toBe(false);
 });
 
 test.each(['28538-wkndcommerce', 'another-stage', undefined])('approved release cannot enable %s', (namespace) => {

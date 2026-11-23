@@ -71,12 +71,17 @@ const SUBJECT = crypto.createHash('sha256').update(SUB, 'utf8').digest('hex');
 
 describe('ID Service request (documented direct integration)', () => {
   test('sends only org, version, optional stored ECID and the declared authenticated ID', () => {
-    const url = new URL(idServiceUrl({ orgId: ORG, dpid: DPID, sub: SUB }));
+    const url = new URL(idServiceUrl({
+      orgId: ORG, dpid: DPID, sub: SUB, ecid: ECID_A,
+    }));
     expect(`${url.origin}${url.pathname}`).toBe(ID_SERVICE);
-    expect([...url.searchParams.keys()]).toEqual(['d_orgid', 'd_ver', 'd_cid']);
+    expect([...url.searchParams.keys()]).toEqual(['d_orgid', 'd_ver', 'd_mid', 'd_cid']);
     expect(url.searchParams.get('d_ver')).toBe('2');
     expect(url.searchParams.get('d_cid')).toBe(`${DPID}\u0001${SUB}\u00011`);
     expect(url.search).toContain('d_cid=1547309%01auth0%7Cpilot-shopper%011');
+    const anonymous = new URL(idServiceUrl({ orgId: ORG }));
+    expect([...anonymous.searchParams.keys()]).toEqual(['d_orgid', 'd_ver']);
+    expect(() => idServiceUrl({ orgId: ORG, dpid: DPID, sub: SUB })).toThrow('known ECID');
     const resync = new URL(idServiceUrl({
       orgId: ORG, dpid: DPID, sub: SUB, ecid: ECID_A,
     }));
@@ -143,13 +148,16 @@ describe('configuration: no default consent source or store', () => {
 });
 
 describe('issuance, reuse and resync', () => {
-  test('cold start (no record): one cookieless call without d_mid, bound to shopper + consent grant', async () => {
+  test('cold start persists an anonymously acquired MID before transmitting a declared ID', async () => {
     const { p, store, fetchImpl } = provider();
     expect(await resolveA(p)).toEqual({
       source: 'server-issued', ecid: ECID_A, locationHint: 9, blob: 'issued-blob', consentGrantId: 'consent-evt-1',
     });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(dMid(fetchImpl)).toBeNull();
+    expect(new URL(fetchImpl.mock.calls[0][0]).searchParams.has('d_cid')).toBe(false);
+    expect(dMid(fetchImpl, 1)).toBe(ECID_A);
+    expect(store.put.mock.calls[1][1]).toMatchObject({ state: 'issuing', priorEcid: ECID_A });
     const init = fetchImpl.mock.calls[0][1];
     expect(init).toMatchObject({ method: 'GET', redirect: 'error', credentials: 'omit' });
     expect(init.headers).toBeUndefined();
@@ -157,6 +165,8 @@ describe('issuance, reuse and resync', () => {
       state: 'bound',
       shopperKey: KEY,
       subject: SUBJECT,
+      orgId: ORG,
+      dpid: DPID,
       consentGrantId: 'consent-evt-1',
       ecid: ECID_A,
       locationHint: 9,
@@ -172,29 +182,29 @@ describe('issuance, reuse and resync', () => {
     const lookups = consent.lookup.mock.calls.length;
     advance(TTL_MS - 1);
     expect((await resolveA(p)).ecid).toBe(ECID_A);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(consent.lookup.mock.calls.length).toBe(lookups + 1);
   });
 
-  test('resync keeps one ECID (d_mid) and refuses a different returned ECID without losing continuity', async () => {
+  test('a resync with an unexpected ECID retains retirement work and never retries linking', async () => {
     const store = memoryStore();
     await resolveA(provider({ store }).p);
     const bad = provider({ store, clock: T0 + TTL_MS, fetchImpl: fetchJson(idResponse({ d_mid: ECID_B })) });
     expect(await resolveA(bad.p)).toEqual(un('id-service-invalid'));
     expect(dMid(bad.fetchImpl)).toBe(ECID_A);
-    expect(store.record(KEY)).toMatchObject({ state: 'issuing', priorEcid: ECID_A });
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A, retirement: { state: 'pending' } });
     const ok = provider({
       store, clock: T0 + TTL_MS + DEFAULT_LEASE_MS, fetchImpl: fetchJson(idResponse({ d_blob: 'fresh' })),
     });
-    expect(await resolveA(ok.p)).toMatchObject({ ecid: ECID_A, blob: 'fresh' });
-    expect(dMid(ok.fetchImpl)).toBe(ECID_A);
+    expect(await resolveA(ok.p)).toEqual(un('retirement-pending'));
+    expect(ok.fetchImpl).not.toHaveBeenCalled();
   });
 
   test('a missing TTL is never reused', async () => {
     const { p, fetchImpl } = provider({ fetchImpl: fetchJson(idResponse({ id_sync_ttl: undefined })) });
     await resolveA(p);
     await resolveA(p);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
     expect(dMid(fetchImpl, 1)).toBe(ECID_A);
   });
 
@@ -220,11 +230,11 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
   test.each([
     ['withdrawn', { state: 'withdrawn' }],
     ['missing (absent record)', { state: 'absent' }],
-  ])('consent %s removes the binding and calls nothing', async (_, answer) => {
+  ])('consent %s retires the known binding and calls nothing', async (_, answer) => {
     const store = await bound();
     const { p, fetchImpl } = provider({ store, consent: consentSource(answer) });
     expect(await resolveA(p)).toEqual(un(answer.state === 'withdrawn' ? 'consent-withdrawn' : 'consent-absent'));
-    expect(store.data.has(KEY)).toBe(false);
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A, retirement: { state: 'pending' } });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
@@ -254,30 +264,32 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('reconsent after withdrawal mints a new ECID even if no resolve saw the withdrawal', async () => {
+  test('reconsent preserves the old MID pending retirement even if no resolve saw withdrawal', async () => {
     const store = await bound();
     const again = provider({
       store,
       consent: consentSource({ state: 'granted', grantId: 'consent-evt-2' }),
       fetchImpl: fetchJson(idResponse({ d_mid: ECID_B })),
     });
-    expect((await resolveA(again.p)).ecid).toBe(ECID_B);
-    expect(dMid(again.fetchImpl)).toBeNull();
-    expect(store.record(KEY)).toMatchObject({ ecid: ECID_B, consentGrantId: 'consent-evt-2' });
+    expect(await resolveA(again.p)).toEqual(un('retirement-pending'));
+    expect(again.fetchImpl).not.toHaveBeenCalled();
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A, consentGrantId: GRANTED.grantId });
   });
 
-  test('withdrawal landing during issuance cannot resurrect the binding', async () => {
+  test('withdrawal during declared-ID transmission retains the MID and cannot resurrect a binding', async () => {
     const store = memoryStore();
     const consent = consentSource();
     let p;
     const fetchImpl = jest.fn(async () => {
-      consent.answer = { state: 'withdrawn' };
-      await p.invalidate(KEY);
+      if (fetchImpl.mock.calls.length === 2) {
+        consent.answer = { state: 'withdrawn' };
+        await p.invalidate(KEY);
+      }
       return { ok: true, json: async () => idResponse() };
     });
     ({ p } = provider({ store, consent, fetchImpl }));
     expect(await resolveA(p)).toEqual(un('cas-conflict'));
-    expect(store.data.has(KEY)).toBe(false);
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A, retirement: { state: 'pending' } });
   });
 
   test('withdrawal between the first check and the claim is caught by the post-claim check', async () => {
@@ -288,16 +300,115 @@ describe('consent lifecycle (authoritative lookup; missing / fail / withdrawal /
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  test('invalidate() (withdrawal / erasure hook) removes unconditionally and is idempotent', async () => {
+  test('invalidate() retains known IDs pending retirement and is idempotent', async () => {
     const store = await bound();
     const { p } = provider({ store });
     expect(await p.invalidate(KEY)).toBe(true);
     expect(await p.invalidate(KEY)).toBe(true);
-    expect(store.data.has(KEY)).toBe(false);
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A });
+  });
+});
+
+describe('durable issuance and retirement boundaries', () => {
+  test('a legacy ambiguous issuing record is quarantined, never mistaken for anonymous acquisition', async () => {
+    const store = memoryStore();
+    await store.put(KEY, {
+      state: 'issuing', shopperKey: KEY, subject: SUBJECT, consentGrantId: GRANTED.grantId,
+      priorEcid: null, leaseUntil: T0 - 1,
+    }, { ifMatch: null });
+    const { p, fetchImpl } = provider({ store });
+    expect(await resolveA(p)).toEqual(un('retirement-pending'));
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', retirement: { state: 'pending', reason: 'identity-unknown' } });
+    expect(fetchImpl).not.toHaveBeenCalled();
+    await p.invalidate(KEY);
+    expect(store.record(KEY).state).toBe('retiring');
+  });
+
+  test('a failed anonymous-MID persistence never transmits a declared ID', async () => {
+    const store = memoryStore();
+    const put = store.put.getMockImplementation();
+    store.put.mockImplementation((key, record, opts) => (
+      record.priorEcid ? Promise.reject(new Error('write unavailable')) : put(key, record, opts)
+    ));
+    const { p, fetchImpl } = provider({ store });
+    expect(await resolveA(p)).toEqual(un('store-error'));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new URL(fetchImpl.mock.calls[0][0]).searchParams.has('d_cid')).toBe(false);
+    expect(store.record(KEY).priorEcid).toBeNull();
+  });
+
+  test('withdrawal during anonymous minting cannot transmit a declared ID', async () => {
+    const store = memoryStore();
+    const consent = consentSource();
+    let p;
+    const fetchImpl = jest.fn(async () => {
+      consent.answer = { state: 'withdrawn' };
+      await p.invalidate(KEY);
+      return { ok: true, json: async () => idResponse() };
+    });
+    ({ p } = provider({ store, consent, fetchImpl }));
+    expect(await resolveA(p)).toEqual(un('cas-conflict'));
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(new URL(fetchImpl.mock.calls[0][0]).searchParams.has('d_cid')).toBe(false);
+    expect(store.record(KEY)).toBeUndefined();
+  });
+
+  test.each(['lost-response', 'invalid-response'])('%s after linking retains pending work across reconsent', async (failure) => {
+    const store = memoryStore();
+    const consent = consentSource();
+    let beforeTransmission;
+    const fetchImpl = jest.fn(async (request) => {
+      const url = new URL(request);
+      if (url.searchParams.has('d_cid')) {
+        beforeTransmission = structuredClone(store.record(KEY));
+        if (failure === 'lost-response') throw new Error('response lost after simulated acceptance');
+        return { ok: true, json: async () => ({}) };
+      }
+      return { ok: true, json: async () => idResponse() };
+    });
+    const { p, advance } = provider({ store, consent, fetchImpl });
+    expect(await resolveA(p)).toEqual(un(failure === 'lost-response' ? 'id-service-unreachable' : 'id-service-invalid'));
+    expect(beforeTransmission).toMatchObject({ state: 'issuing', priorEcid: ECID_A, orgId: ORG });
+    expect(dMid(fetchImpl, 1)).toBe(ECID_A);
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A, consentGrantId: GRANTED.grantId, retirement: { state: 'pending' } });
+    advance(DEFAULT_LEASE_MS + 1);
+    consent.answer = { state: 'granted', grantId: 'new-grant' };
+    expect(await resolveA(p)).toEqual(un('retirement-pending'));
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  test('a crashed linking holder retains its MID; lease expiry cannot mint another or overwrite retirement', async () => {
+    const store = memoryStore();
+    let release;
+    const slow = jest.fn(async (request) => {
+      if (new URL(request).searchParams.has('d_cid')) return new Promise((resolve) => { release = resolve; });
+      return { ok: true, json: async () => idResponse() };
+    });
+    const first = provider({ store, fetchImpl: slow });
+    const pending = resolveA(first.p);
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(store.record(KEY)).toMatchObject({ state: 'issuing', priorEcid: ECID_A });
+    const retry = provider({ store, clock: T0 + DEFAULT_LEASE_MS });
+    expect(await resolveA(retry.p)).toEqual(un('retirement-pending'));
+    expect(retry.fetchImpl).not.toHaveBeenCalled();
+    release({ ok: true, json: async () => idResponse() });
+    expect(await pending).toEqual(un('cas-conflict'));
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A });
   });
 });
 
 describe('confirm(): authoritative re-check for the issued grant', () => {
+  test('pending retirement invalidates a previously issued binding even while consent remains granted', async () => {
+    const { p, store } = provider();
+    const binding = await resolveA(p);
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(true);
+    await p.invalidate(KEY);
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+    expect(store.record(KEY)).toMatchObject({ state: 'retiring', ecid: ECID_A });
+    store.get.mockRejectedValueOnce(new Error('read unavailable'));
+    expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+  });
+
   test('true only while the same grant is current', async () => {
     const consent = consentSource();
     const { p } = provider({ consent });
@@ -319,7 +430,7 @@ describe('concurrency and storage CAS', () => {
   test('concurrent cold-start resolves mint at most one ECID', async () => {
     const { p, store, fetchImpl } = provider();
     const results = await Promise.all([resolveA(p), resolveA(p)]);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     expect(results.filter((r) => r.source === 'server-issued')).toHaveLength(1);
     expect(results.filter((r) => r.source === 'unavailable').map((r) => r.reason)).toEqual(expect.arrayContaining([expect.stringMatching(/^(cas-conflict|issuing-in-progress)$/)]));
     expect(store.record(KEY).ecid).toBe(ECID_A);
@@ -336,16 +447,16 @@ describe('concurrency and storage CAS', () => {
     expect(results.filter((r) => r.source === 'unavailable').map((r) => r.reason)).toEqual(expect.arrayContaining([expect.stringMatching(/^(cas-conflict|issuing-in-progress)$/)]));
   });
 
-  test('a live issuing lease is not pre-empted; a lapsed one is taken over with the prior ECID', async () => {
+  test('an anonymous mint lease is not pre-empted; a lapsed one can mint without declared IDs', async () => {
     const store = memoryStore();
-    await resolveA(provider({ store }).p);
     await resolveA(provider({ store, clock: T0 + TTL_MS, fetchImpl: fetchJson({}, 503) }).p);
     const during = provider({ store, clock: T0 + TTL_MS + DEFAULT_LEASE_MS - 1 });
     expect(await resolveA(during.p)).toEqual(un('issuing-in-progress'));
     expect(during.fetchImpl).not.toHaveBeenCalled();
     const after = provider({ store, clock: T0 + TTL_MS + DEFAULT_LEASE_MS });
     expect((await resolveA(after.p)).ecid).toBe(ECID_A);
-    expect(dMid(after.fetchImpl)).toBe(ECID_A);
+    expect(dMid(after.fetchImpl)).toBeNull();
+    expect(new URL(after.fetchImpl.mock.calls[0][0]).searchParams.has('d_cid')).toBe(false);
   });
 
   test('a holder whose lease was taken over cannot overwrite the newer binding', async () => {
@@ -453,12 +564,12 @@ describe('diagnostic hand-off (adapter still inert by default)', () => {
     }
     expect(spy).not.toHaveBeenCalled();
     expect(store.data.get(KEY)).toEqual(before);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   test('same-device account switch after logout uses only the new shopper\'s own binding; re-login reuses without churn', async () => {
     const store = memoryStore();
-    const ids = [idResponse(), idResponse({ d_mid: ECID_B })];
+    const ids = [idResponse(), idResponse(), idResponse({ d_mid: ECID_B }), idResponse({ d_mid: ECID_B })];
     const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => ids.shift() }));
     const { p } = provider({ store, fetchImpl });
     const target = targetFetch();
@@ -467,7 +578,7 @@ describe('diagnostic hand-off (adapter still inert by default)', () => {
     await run({ sub: SUB }, p, target);
     const sentEcids = target.mock.calls.map(([, init]) => JSON.parse(init.body).id.marketingCloudVisitorId);
     expect(sentEcids).toEqual([ECID_A, ECID_B, ECID_A]);
-    expect(fetchImpl).toHaveBeenCalledTimes(2);
-    expect(dMid(fetchImpl, 1)).toBeNull();
+    expect(fetchImpl).toHaveBeenCalledTimes(4);
+    expect(dMid(fetchImpl, 2)).toBeNull();
   });
 });

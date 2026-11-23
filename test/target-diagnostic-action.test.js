@@ -156,9 +156,11 @@ describe('Production preparation remains inert and isolated', () => {
     await prod.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
     const result = await prod.call({ op: 'decide' }, { token });
     expect(result.body).toMatchObject({ environment: 'production', status: 'decided', marker: 'climbing-planner', financialAuthorization: false });
-    expect(JSON.parse(prod.fetchImpl.mock.calls[1][1].body).execute.mboxes[0].name).toBe(PRODUCTION_MBOX);
+    expect(JSON.parse(prod.fetchImpl.mock.calls[2][1].body).execute.mboxes[0].name).toBe(PRODUCTION_MBOX);
     await prod.call({ op: 'consent', optIn: false }, { token });
-    expect(await prod.store.collection(BINDING_COLLECTION).find({})).toHaveLength(0);
+    expect(await prod.store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID }) }),
+    ]);
     expect(await stage.store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
     expect((await stage.call({ op: 'consent-status' }, { token })).body).toMatchObject({ environment: 'stage', consent: 'granted' });
   });
@@ -196,7 +198,9 @@ describe('Production preparation remains inert and isolated', () => {
     expect(r.body.marker).toBeUndefined();
     const after = await h.store.collection('customers').findOne({ sub: SUB });
     expect(after.idLinkage.grantId).not.toBe(before.idLinkage.grantId);
-    expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(0);
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID, consentGrantId: before.idLinkage.grantId }) }),
+    ]);
   });
 });
 
@@ -372,7 +376,7 @@ describe('identity: only verified, first-party, allowlisted shoppers; config is 
 
 describe('consent operations and the inert decide flow', () => {
   test.each([
-    ['success', { statusCode: 200, body: { consent: 'granted', changed: true } }, { status: 'decided' }, 2, 1],
+    ['success', { statusCode: 200, body: { consent: 'granted', changed: true } }, { status: 'decided' }, 3, 1],
     ['rejection', { statusCode: 503, body: { reason: 'evidence-failed' } }, { status: 'unavailable', bindingReason: 'consent-withdrawn' }, 0, 0],
   ])('pending evidence (%s) cannot issue a binding or expose a marker', async (outcome, expectedGrant, expectedDecision, fetchCount, bindingCount) => {
     const h = harness();
@@ -423,7 +427,7 @@ describe('consent operations and the inert decide flow', () => {
         status: 'decided', marker: 'climbing-planner', evidence: false, financialAuthorization: false,
       },
     });
-    const sent = JSON.parse(h.fetchImpl.mock.calls[1][1].body);
+    const sent = JSON.parse(h.fetchImpl.mock.calls[2][1].body);
     expect(sent.id.marketingCloudVisitorId).toBe(ECID);
     for (const secret of [SUB, KEY, ECID, BLOB, token]) {
       expect(JSON.stringify(r.body)).not.toContain(secret);
@@ -468,7 +472,7 @@ describe('consent operations and the inert decide flow', () => {
     expect((await h.call({ op: 'decide' }, { token })).body).toMatchObject({ reason: 'consent-changed' });
   });
 
-  test('withdrawal via the action removes the shopper\'s stored binding', async () => {
+  test('withdrawal via the action retains the shopper\'s stored MID pending retirement', async () => {
     const h = harness();
     await seedCustomer(h.store);
     const token = await auth0Token();
@@ -476,7 +480,9 @@ describe('consent operations and the inert decide flow', () => {
     await h.call({ op: 'decide' }, { token });
     expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
     expect((await h.call({ op: 'consent', optIn: false }, { token })).body).toMatchObject({ status: 'ok', consent: 'withdrawn', changed: true });
-    expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID, retirement: { state: 'pending', reason: 'consent-withdrawn' } }) }),
+    ]);
   });
 
   test('withdrawal works with linkage off (never blocked), a grant does not', async () => {

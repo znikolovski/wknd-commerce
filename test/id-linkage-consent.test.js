@@ -19,7 +19,6 @@ const EMAIL = 'Pilot@Example.com';
 const CONFIG = linkageConfig({ TARGET_ID_LINKAGE_ENABLED: 'true', TARGET_ID_LINKAGE_WORDING_VERSIONS: 'idl-2026-11' });
 const T0 = Date.UTC(2026, 10, 23);
 const ECID_A = '1'.repeat(38);
-const ECID_B = '2'.repeat(38);
 
 async function seeded(extra = {}) {
   const store = createMemoryStore();
@@ -109,7 +108,7 @@ describe('ID-linkage consent purpose (separate, optional, explicit)', () => {
     const store = await seeded();
     await grant(store);
     const { grantId } = (await customer(store)).idLinkage;
-    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId, state: 'bound' } });
+    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId, state: 'issuing', phase: 'minting', priorEcid: null } });
     await store.collection(BINDING_COLLECTION).insertOne({ _id: 'other', etag: 'e2', record: { subject: sha256('auth0|other') } });
     expect(await setIdLinkageConsent(store, { sub: SUB }, false, { config: linkageConfig({}) }))
       .toEqual({ state: 'withdrawn', changed: true });
@@ -310,7 +309,7 @@ describe('Brevo unsubscribe (withdraw-all) never grants and conservatively withd
     const store = await seeded();
     await grant(store);
     const { grantId } = (await customer(store)).idLinkage;
-    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId } });
+    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId, state: 'issuing', phase: 'minting', priorEcid: null } });
     expect((await webhook(store)).status).toBe(200);
     expect((await customer(store)).idLinkage).toMatchObject({ state: 'withdrawn', source: 'brevo-unsubscribe' });
     expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
@@ -362,10 +361,12 @@ describe('Brevo unsubscribe (withdraw-all) never grants and conservatively withd
       message: failure === 'all evidence' ? 'The setting could not be saved.' : 'Email preference evidence could not be saved.',
     });
     expect(await lookup(store)).toEqual({ state: 'withdrawn' });
-    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID_A }) }),
+    ]);
     expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
     expect((await provider.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('consent-withdrawn');
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -466,10 +467,10 @@ describe('CAS binding store adapter (repo store surface)', () => {
 
   test('a missing DB collection is "nothing to remove" for withdrawal paths', async () => {
     const notFound = Object.assign(new Error('Collection not found'), { httpStatusCode: 404 });
-    const store = { collection: () => ({ deleteMany: async () => { throw notFound; }, deleteOne: async () => { throw notFound; } }) };
+    const store = { collection: () => ({ find: async () => { throw notFound; }, deleteOne: async () => { throw notFound; } }) };
     expect(await removeBindingsForSubject(store, 'x')).toBe(0);
     expect(await createBindingStore(store).remove(KEY)).toBe(false);
-    const other = { collection: () => ({ deleteMany: async () => { throw new Error('auth'); } }) };
+    const other = { collection: () => ({ find: async () => { throw new Error('auth'); } }) };
     await expect(removeBindingsForSubject(other, 'x')).rejects.toThrow('auth');
   });
 });
@@ -487,9 +488,9 @@ describe('provider end-to-end on the real adapters (memory store, fake ID Servic
     now: () => T0,
   });
 
-  test('grant → bind; withdraw (removes binding) → nothing; reconsent → a fresh ECID without d_mid', async () => {
+  test('grant → bind; withdrawal retains its MID; reconsent cannot bypass pending retirement', async () => {
     const store = await seeded();
-    const ids = [idResponse(ECID_A), idResponse(ECID_B)];
+    const ids = [idResponse(ECID_A), idResponse(ECID_A)];
     const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => ids.shift() }));
     const p = build(store, fetchImpl);
     expect((await p.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('consent-absent');
@@ -499,49 +500,54 @@ describe('provider end-to-end on the real adapters (memory store, fake ID Servic
     expect(first).toMatchObject({ source: 'server-issued', ecid: ECID_A });
     expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding: first })).toBe(true);
     await setIdLinkageConsent(store, { sub: SUB }, false);
-    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID_A }) }),
+    ]);
     expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding: first })).toBe(false);
     expect((await p.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('consent-withdrawn');
     await grant(store);
     expect(await p.confirm({ shopperKey: KEY, sub: SUB, binding: first })).toBe(false);
-    expect((await p.resolve({ shopperKey: KEY, sub: SUB })).ecid).toBe(ECID_B);
-    expect(new URL(fetchImpl.mock.calls[1][0]).searchParams.has('d_mid')).toBe(false);
+    expect((await p.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('retirement-pending');
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
-  test('withdrawal while the ID Service call is in flight removes the claim; the final write cannot resurrect', async () => {
+  test('withdrawal during linking retires the durable MID; the final write cannot resurrect', async () => {
     const store = await seeded();
     await grant(store);
     const fetchImpl = jest.fn(async () => {
-      await setIdLinkageConsent(store, { sub: SUB }, false);
+      if (fetchImpl.mock.calls.length === 2) await setIdLinkageConsent(store, { sub: SUB }, false);
       return { ok: true, json: async () => idResponse(ECID_A) };
     });
     expect((await build(store, fetchImpl).resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('cas-conflict');
-    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([
+      expect.objectContaining({ record: expect.objectContaining({ state: 'retiring', ecid: ECID_A, retirement: { state: 'pending', reason: 'consent-withdrawn' } }) }),
+    ]);
   });
 
-  test('delayed withdrawal cleanup never deletes a newer grant binding', async () => {
+  test('delayed withdrawal cleanup and reconsent cannot discard the pending retired generation', async () => {
     const store = await seeded();
     await grant(store);
     const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => idResponse(ECID_A) }));
     const provider = build(store, fetchImpl);
     await provider.resolve({ shopperKey: KEY, sub: SUB });
     const bindings = store.collection(BINDING_COLLECTION);
-    const remove = bindings.deleteMany.bind(bindings);
+    const update = bindings.updateOne.bind(bindings);
     let entered;
     let finish;
     const started = new Promise((resolve) => { entered = resolve; });
-    jest.spyOn(bindings, 'deleteMany').mockImplementationOnce((filter) => {
+    jest.spyOn(bindings, 'updateOne').mockImplementationOnce((filter, change) => {
       entered();
-      return new Promise((resolve) => { finish = () => resolve(remove(filter)); });
+      return new Promise((resolve) => { finish = () => resolve(update(filter, change)); });
     });
     const withdrawing = setIdLinkageConsent(store, { sub: SUB }, false);
     await started;
     await grant(store);
     const binding = await provider.resolve({ shopperKey: KEY, sub: SUB });
-    expect(binding.source).toBe('server-issued');
+    expect(binding.reason).toBe('retirement-pending');
     finish();
     await withdrawing;
-    expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(true);
+    expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
     expect(await bindings.find({})).toHaveLength(1);
+    expect((await bindings.find({}))[0].record).toMatchObject({ state: 'retiring', ecid: ECID_A });
   });
 });

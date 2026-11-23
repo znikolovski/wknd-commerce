@@ -193,9 +193,12 @@ Opt-in is separate and unchecked by default; display sanctioned wording, not bun
   - Every recovery write is conditional on the pending generation's `grantId`, so it can never
     overwrite a later withdrawal or regrant.
 - **Withdrawal** is always allowed.
-  - It conditionally withdraws the current pending or granted generation first, then removes bindings
-    matching both `sha256(sub)` and that generation, then appends evidence. Delayed cleanup cannot
-    delete a newer grant's binding. Evidence failure is explicit and sanitized; withdrawal stays effective.
+  - It conditionally withdraws the current pending or granted generation first, then retires known
+    ECIDs matching both `sha256(sub)` and that generation, then appends evidence. Only anonymous
+    mint claims without a known ECID are removed. Retirement retains identifiers as non-authorizing
+    `retiring` records with `retirement.state='pending'`; it is not an upstream opt-out acknowledgment.
+    Delayed cleanup cannot overwrite a newer generation. Evidence failure is explicit and sanitized;
+    withdrawal stays effective.
   - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) attempts every
     authoritative state change (linkage for each matching customer, then both email purposes)
     regardless of the others' failures, and only then reports errors: state failures first, then
@@ -215,7 +218,8 @@ Opt-in is separate and unchecked by default; display sanctioned wording, not bun
 |---|---|---|
 | Withdrawal before the issuance claim | Pre-claim consent check | provider: consent withdrawn |
 | Between the first check and the claim | Post-claim authoritative check | provider: post-claim check |
-| During the ID Service call | Withdrawal removes the claim (it carries `subject`); the final `put(ifMatch: claim)` fails with `cas-conflict` | id-linkage: in-flight withdrawal |
+| During anonymous MID acquisition | Withdrawal removes the anonymous claim; persistence loses CAS ownership, so no declared ID can be sent | provider: anonymous mint withdrawal |
+| During declared-ID transmission | The MID is already durable; withdrawal changes the claim into pending retirement. The late final write fails CAS, retaining the cleanup identifier | id-linkage: in-flight withdrawal |
 | After `resolve`, before the Target request | `confirm()` (same `grantId`) immediately before sending. If it fails, nothing is sent. | diagnostic: before the Target request |
 | During the Target request | `confirm()` again before returning. A withdrawal or reconsent gives `consent-changed` with no marker. | diagnostic and action: during the Target request |
 
@@ -230,9 +234,17 @@ only by `actions/target-diagnostic` for `op:'decide'` after every decide gate pa
 default provider is still `unavailableBindingProvider`.
 - `resolve` returns a binding with its `consentGrantId`, or `{ source:'unavailable', reason }`, where
   the reason comes from `BINDING_REASONS` and never carries identifiers.
-- `confirm()` re-checks the same grant.
+- `confirm()` re-checks the same grant and the still-bound stored ECID; pending retirement or store
+  failure suppresses a previously issued binding even if consent remains granted.
 
-- **Request:** `GET https://dpm.demdex.net/id?d_orgid=…&d_ver=2[&d_mid=<stored ECID>]&d_cid=<DPID>%01<verified sub>%011`.
+- **Two-phase requests:** first acquire an anonymous MID with
+  `GET https://dpm.demdex.net/id?d_orgid=…&d_ver=2` (no declared ID). Persist that MID as `priorEcid`
+  under the issuing lease, with the org, DPID, subject hash and consent generation. Recheck consent,
+  then link only the durable MID with
+  `GET https://dpm.demdex.net/id?d_orgid=…&d_ver=2&d_mid=<stored ECID>&d_cid=<DPID>%01<verified sub>%011`.
+  These two use cases are [documented by Adobe](https://experienceleague.adobe.com/en/docs/id-service/using/implementation/direct-integration-examples).
+  A failed MID persistence never sends a declared ID. A lost anonymous response may leave an unknown
+  anonymous MID upstream, but this implementation has not linked it to a declared ID.
   - No traits, `d_cb`, headers, cookies, browser identifiers or caller input.
   - `redirect:'error'`, `credentials:'omit'`, with a timeout.
 - **Response:** documented wire types only. `d_mid` must be a 38-digit string. `dcs_region` and `id_sync_ttl`
@@ -253,12 +265,12 @@ default provider is still `unavailableBindingProvider`.
 | Answer | Meaning | Provider action |
 |---|---|---|
 | `{ state:'granted', grantId }` | Current opt-in. `grantId` (1–128 chars `[A-Za-z0-9._:-]`) identifies that specific grant, e.g. the opt-in event ID. | Issue or reuse, only within the same `grantId`. |
-| `{ state:'withdrawn' }` | Explicit opt-out. | Remove the binding; issue nothing. |
-| `{ state:'absent' }` | No consent record, e.g. never asked or erased. | Remove the binding if one exists; write nothing otherwise. |
-| A throw, or anything else (bare `true`, a missing or malformed `grantId`, unknown states) | Unknown. | Deny, and change **nothing**: no store write, removal or ID Service call. |
+| `{ state:'withdrawn' }` | Local linkage withdrawal, not proof of Adobe opt-out. | Retire known IDs; remove anonymous claims; issue nothing. |
+| `{ state:'absent' }` | No consent record, e.g. never asked or erased. | Retire known IDs if present; write nothing with no record. |
+| A throw, or anything else (bare `true`, a missing or malformed `grantId`, unknown states) | Unknown. | Initial lookup: deny unchanged. If a later check fails after MID acquisition, retain that MID pending retirement rather than transmit a declared ID. |
 
-Unknown never removes, because an outage is not a withdrawal and removal would cause ECID churn.
-Unknown never issues either, so a withdrawal during an outage is still honoured.
+An initial unknown lookup never removes or issues: an outage is not a withdrawal. A later lookup
+failure cannot discard an already-retained MID or authorize linking; it fails closed.
 
 Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEmail` and
 `marketing.audienceEmail` are email purposes, and consent is never bundled or inferred
@@ -268,17 +280,17 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 
 | Path | Behaviour |
 |---|---|
-| Cold start (no record) | Claim with create-if-absent, re-check consent, then make one ID Service call **without** `d_mid`. Bind `{shopperKey, consentGrantId, ecid, locationHint, blob, issuedAt, resyncAt}`. |
+| Cold start (no record) | Claim, re-check consent, acquire anonymously, persist the MID by CAS, re-check consent, then link the known MID. No declared-ID request precedes durable MID retention. |
 | Reuse before `resyncAt` | No ID Service call. Consent is still looked up on every resolve. |
-| Resync / concurrent refresh | One lease holder sends the stored ECID as `d_mid`. A different returned ECID is refused, and the prior ECID is kept in the lease for the next attempt. Concurrent callers get unavailable rather than making a second call. |
-| ID Service failure | Unavailable. The lease lapses; nothing is bound. |
-| Consent missing / withdrawn | The binding is removed (conditional on the etag that was read) and nothing is issued. |
+| Resync / concurrent refresh | One lease holder sends the stored ECID as `d_mid`. Concurrent callers get unavailable. A failed or ambiguous linking response retains the known MID as pending retirement rather than retrying linkage. |
+| ID Service failure | Anonymous failure leaves a reclaimable anonymous lease. Linking timeout, lost/invalid response or HTTP failure retains pending retirement. If a store outage prevents retirement, the already-durable known-MID claim remains; its expired lease cannot mint another MID. |
+| Consent missing / withdrawn | Known IDs are retained for retirement; anonymous claims are removed by CAS; nothing is issued. |
 | Consent failure / malformed | Deny, no mutation. |
-| Withdrawal while issuance is in flight | Claim **before** the authoritative consent check. A withdrawal that lands later removes the claim, so the final `put(ifMatch: claim)` fails and nothing is resurrected. |
-| Reconsent (new `grantId`) | A new ECID is minted without `d_mid`, even if no resolve observed the withdrawal. The old ECID is never sent again. |
-| Account switch | Bindings are keyed by `shopperKey(AUTH0_ISSUER, sub)`. A first issuance never sends `d_mid`; there is no cookie jar; another shopper's ECID is never reused. A record whose `shopperKey` differs from its key is never reused, sent or overwritten; it fails closed. |
+| Withdrawal while issuance is in flight | Removing an anonymous claim prevents later linking. Retiring a known-MID claim preserves its ID and changes the etag; a late response cannot restore a usable binding. |
+| Reconsent (new `grantId`) | Consent may be granted again, but a known ID from the old generation becomes/stays pending retirement. `resolve` returns `retirement-pending`, never overwrites that work or mints another linked MID. No automatic retirement release is implemented. |
+| Account switch | Bindings are keyed by `shopperKey(AUTH0_ISSUER, sub)`. Anonymous acquisition omits `d_mid`; linking uses only that shopper's persisted MID. Another shopper's binding, or a record carrying a different org/DPID, fails closed. |
 | Logout | No provider action, by design. See the proof below. |
-| Withdrawal / erasure push | `invalidate(shopperKey)` is an unconditional, idempotent removal for the consent owner to call **after** flipping consent. |
+| Withdrawal push | `invalidate(shopperKey)` conditionally retires known IDs or removes anonymous claims after flipping consent. It does not perform erasure. |
 
 **Logout proof (tests).**
 - Without verified claims, the adapter returns `unauthenticated` and never calls `resolve`, so the
@@ -305,10 +317,13 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
   - create-if-absent: `insertOne`, with a duplicate-key error meaning `null`;
   - conditional update: `updateOne({_id, etag}, {$set})` succeeding only when `matchedCount === 1`;
   - removal: `deleteOne({_id[, etag]})`.
-- Records have three states: `issuing` (a lease with `leaseUntil` and `priorEcid`), `bound`, and
-  removed.
+- Records have three persisted states: `issuing` (a lease with `leaseUntil` and `priorEcid`), `bound`,
+  and `retiring` (known ECID and `retirement.state='pending'`). Anonymous claims may be removed.
+  - Issuing records explicitly distinguish `phase:'minting'` from `phase:'linking'`. Legacy ambiguous
+    issuing records or bound records without a valid MID are quarantined as pending retirement;
+    no missing MID is invented and no ambiguous old claim is reminted.
   - A live lease is never pre-empted.
-  - A lapsed lease (from a crashed holder) is taken over, keeping `priorEcid`.
+  - Only an anonymous lapsed lease may be taken over. A lapsed lease carrying `priorEcid` is retired.
   - A holder that has been taken over cannot overwrite the newer binding.
 - **Cold start:** the provider keeps no in-memory state, so a new action instance behaves exactly like
   a warm one. An empty or lost store is indistinguishable from a first issuance and mints a new ECID.
@@ -321,14 +336,17 @@ Only the separate ID-linkage purpose backs this interface. `marketing.recoveryEm
 - the consent purpose;
 - the authoritative consent source;
 - the CAS binding-store adapter;
-- withdrawal call sites (shopper withdrawal and Brevo unsubscribe), with binding removal;
+- withdrawal call sites (shopper withdrawal and Brevo unsubscribe), with durable known-ID retirement;
 - the environment-bound action and final manifest entry;
 - the deploy gate;
 - strict wire parsing;
 - categorized errors;
 - the consent re-checks before sending and before exposing a result.
 
-**Live acceptance gates.** These need approval or evidence, not code; each blocks enabling a flag.
+**Live acceptance gates.** These need approval, evidence or the remaining upstream lifecycle capability;
+each blocks enabling a flag. Pending retirement has no automatic submission/verification/release
+worker. Do not enable ID Service on the strength of this local safety fix alone. See
+[the upstream lifecycle runbook](TARGET-UPSTREAM-DELETION.md).
 
 1. **Operational wording.** The operational owner sanctions the ID-linkage wording and adds its
    nonempty version to `WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS`. Legal review is not a project gate.

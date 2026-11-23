@@ -22,8 +22,10 @@ application:
           HLX_SITE: $WKND_HLX_SITE
           HLX_ADMIN_API_KEY: $WKND_HLX_ADMIN_API_KEY
           TARGET_PERSON_ALIAS_APPROVED: $WKND_TARGET_PERSON_ALIAS_APPROVED
+          # Shared verifier inputs for Commerce and the narrowly scoped person reads.
           MCP_DELEGATION_ISSUER: $WKND_MCP_DELEGATION_ISSUER
           MCP_DELEGATION_SECRET: $WKND_MCP_DELEGATION_SECRET
+          # Rotation overlap only; an empty previous key remains off.
           MCP_DELEGATION_SECRET_PREVIOUS: $WKND_MCP_DELEGATION_SECRET_PREVIOUS
         actions:
           storefront-graphql:
@@ -34,11 +36,6 @@ application:
               AUTH0_ISSUER: $WKND_AUTH0_ISSUER
               AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
               ALLOWED_ORIGINS: $WKND_ALLOWED_ORIGINS
-              # Delegated shopper assertions from the WKND LLM app (ChatGPT); both must be set
-              MCP_DELEGATION_ISSUER: $WKND_MCP_DELEGATION_ISSUER
-              MCP_DELEGATION_SECRET: $WKND_MCP_DELEGATION_SECRET
-              # Rotation overlap only: the previous secret, accepted until cleared (empty = off)
-              MCP_DELEGATION_SECRET_PREVIOUS: $WKND_MCP_DELEGATION_SECRET_PREVIOUS
               # API Mesh introspects this source when the mesh is created/updated.
               ALLOW_INTROSPECTION: 'true'
               CATALOG_MAX_AGE: 60

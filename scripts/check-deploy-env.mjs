@@ -28,7 +28,7 @@ const manifests = ['app.config.yaml', 'src/commerce-runtime.yaml']
   .map((p) => fs.readFileSync(p, 'utf8'));
 
 const result = checkDeployEnv({ manifestTexts: manifests, env });
-console.log(`deploy-env: namespace=${result.namespace || '(unset)'} gates=${JSON.stringify(result.gates)}`);
+console.log(`deploy-env: namespace=${result.namespace || '(unset)'} gates=${JSON.stringify(result.gates)} delegationOverlap=${result.delegationOverlap}`);
 result.warnings.forEach((w) => console.log(`deploy-env: warning: ${w}`));
 result.errors.forEach((e) => console.error(`deploy-env: ERROR: ${e}`));
 if (!result.ok) {

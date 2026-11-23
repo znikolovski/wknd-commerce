@@ -137,6 +137,39 @@ Rotation is prepared, then activated in one coordinated step:
 3. **Verify.** A Production-signed assertion is refused by Stage. Production is never called with
    a Stage assertion.
 
+### Rotating a live key without a gap (rotation overlap)
+
+`MCP_DELEGATION_SECRET_PREVIOUS` (`$WKND_MCP_DELEGATION_SECRET_PREVIOUS`) is an optional second key,
+accepted only while set. Empty or undeclared means single-key behaviour. The deploy check refuses a
+previous key that equals the current one, is shorter than 32 bytes, or has no current key, and it
+prints only `delegationOverlap=true|false`. Claim, scope, lifetime and `jti` replay checks are the same
+for both keys, so a `jti` is accepted once across both.
+
+1. **Prepare.** Generate the new value into a mode-600 file and stage it as the unmapped
+   `WKND_MCP_DELEGATION_SECRET_NEXT` in that environment's deploy `.env`. Edit `.env` files with a
+   parser (never `source` them in a shell; error output can print values).
+2. **Commerce: accept both.** Set `WKND_MCP_DELEGATION_SECRET` to the new value and
+   `WKND_MCP_DELEGATION_SECRET_PREVIOUS` to the old one, deploy actions only. Verify both keys
+   are accepted and the other environment's key is refused.
+3. **Signer: switch.** The LLM app sets `WKND_COMMERCE_ASSERTION_SECRET` to the new value (without
+   reading it back) and redeploys that environment.
+4. **Commerce: drop the old key.** Clear `WKND_MCP_DELEGATION_SECRET_PREVIOUS`, deploy actions only.
+   Verify the old key is refused and the new key is accepted. Remove the old value from every other
+   checkout that could deploy to that namespace.
+
+Rollback. While the overlap is deployed, both keys are accepted, so a signer on either key keeps
+working. Never remove the overlap until the signer runs on the new key and a signed-in read with it
+is verified.
+
+- **Before the signer switches** (it still signs with the old key): restore the old value as
+  `WKND_MCP_DELEGATION_SECRET` and clear `WKND_MCP_DELEGATION_SECRET_PREVIOUS`, then deploy actions
+  only. Only after that, if needed, revert the verifier code to the previous action versions. Do not
+  redeploy previous action versions while the current key is still the new one: the old signer
+  would be refused.
+- **After the signer switches**: roll the signer back to the old value while the overlap still
+  accepts both keys, verify, then restore the old current key as above.
+- **After step 4**: set the previous key again only if the signer still uses it.
+
 ## Activation order
 
 1. `node scripts/migrate-promotions.mjs --verify-storage` (prove unique `_id` + conditional update).

@@ -546,6 +546,11 @@ type Query {
   operational cohort (inactive 24h to 7 days, no purchase since); read-only.
   """
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
+
+  """
+  Stage mock-Commerce planner benefit; automatic selection, no claim/apply mutation.
+  """
+  wkndPlannerOffer(cart_id: String!): WkndRecoveryOffer!
   of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
 }
 
@@ -7159,6 +7164,11 @@ type Cart {
   Opaque concurrency token for this cart state; changes on every cart write. Pass it back as expected_cart_version.
   """
   wknd_cart_version: String!
+
+  """
+  The same normalized planner offer as wkndPlannerOffer; CLAIMED means automatically selected.
+  """
+  wknd_planner_offer: WkndRecoveryOffer!
 }
 
 """"""
@@ -22917,6 +22927,10 @@ enum WkndRecoveryOfferStatus {
 }
 
 type WkndRecoveryOffer {
+  """
+  climbing_planner for the Stage automatic planner benefit; absent on recovery offers.
+  """
+  kind: String
   status: WkndRecoveryOfferStatus!
   reason: String
   coupon_code: String
@@ -22933,6 +22947,7 @@ type WkndRecoveryOffer {
   What the cart's currently applied promotion takes off, for comparison with saving.
   """
   current_saving: Money
+  message: String
 }
 
 """Where the shopper gave or withdrew consent."""

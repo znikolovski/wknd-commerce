@@ -80,6 +80,19 @@ describe('promotions', () => {
     expect(await store.collection('promotions').countDocuments({ id: created.promotion.id })).toBe(1);
   });
 
+  test('non-raw Runtime merged configuration is not treated as bundle query arguments', async () => {
+    require('../lib/store').getStore.mockResolvedValue(store);
+    const { main } = require('../actions/promotions-admin');
+    const response = await main({
+      ...PARAMS, __ow_headers: headersFor(ava.subject), __ow_method: 'post',
+      AUTH0_ISSUER: 'https://example.auth0.com/', PROMOTION_CURSOR_KEY: 'opaque-runtime-input',
+      op: 'promotions.bundleOpportunities', limit: 1, orderLimit: 1,
+    });
+    expect(response).toMatchObject({
+      statusCode: 200, body: { apiVersion: 'wknd.bundling/v1', currency: 'AUD', opportunities: expect.any(Array) },
+    });
+  });
+
   test('create as a disabled draft, list, then enable with a revision check', async () => {
     const created = await api.handle(ava, 'promotions.create', { promotion: draft() });
     expect(created).toMatchObject({ ok: true, promotion: { enabled: false, revision: 1, mode: 'automatic' } });

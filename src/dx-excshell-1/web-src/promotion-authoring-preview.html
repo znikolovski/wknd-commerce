@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>C02 Promotions - fixture authoring</title>
+  <style>
+    :root { font: 16px system-ui, sans-serif; color: #242424; background: #f5f5f5; }
+    body { max-width: 1050px; margin: 40px auto; padding: 0 24px; }
+    header { border-bottom: 1px solid #ccc; margin-bottom: 24px; }
+    h1 { margin-bottom: 8px; } h2 { margin-top: 0; }
+    .badge { display: inline-block; background: #e5eaff; padding: 6px 12px; border-radius: 16px; font-size: 14px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    section { background: white; border: 1px solid #ddd; border-radius: 12px; padding: 24px; }
+    fieldset { border: 0; padding: 0; margin: 0; }
+    label { display: block; margin: 16px 0 6px; font-weight: 600; }
+    input, select, button { font: inherit; border: 1px solid #888; border-radius: 6px; padding: 10px; box-sizing: border-box; }
+    input, select { width: 100%; } button { margin-top: 24px; cursor: pointer; background: #294cff; color: white; border: 0; }
+    button:disabled { opacity: .5; cursor: default; } pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 13px; }
+    #error { color: #b00020; } .note { color: #555; line-height: 1.5; }
+    @media (max-width: 740px) { main { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <span class="badge">C02 / Stage / Fixture prototype</span>
+    <h1>Promotions audience draft</h1>
+    <p class="note">Local preview of the admin/MCP draft validator. No live API, storage or shopper evaluation.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Draft terms</h2>
+      <form id="draft">
+        <fieldset id="controls">
+        <label for="name">Draft name</label>
+        <input id="name" value="Climbing audience demo" maxlength="120" required>
+        <label for="audience">Canonical audience (Stage)</label>
+        <select id="audience" required disabled><option value="">Loading catalogue...</option></select>
+        <label for="percent">Discount percentage</label>
+        <input id="percent" type="number" value="10" min="0.01" max="100" step="0.01" required>
+        <label for="cap">Maximum discount (AUD)</label>
+        <input id="cap" type="number" value="25" min="0.01" step="0.01" required>
+        <p class="note">Automatic offer. All products. Disabled draft. IDs are canonical metadata only, not membership evidence.</p>
+        <button id="validate" disabled>Validate fixture draft</button>
+        </fieldset>
+      </form>
+      <p id="error" role="alert"></p>
+    </section>
+    <section>
+      <h2>Activation blocked</h2>
+      <p class="note">No verified financial-eligibility provider. Draft authoring does not require one. This demo never saves or enables an offer.</p>
+      <p id="status" role="status">Select an audience and validate to see the fixture JSON.</p>
+      <pre id="result" aria-label="Validated fixture JSON"></pre>
+      <button id="download" type="button" hidden>Download fixture JSON</button>
+    </section>
+  </main>
+  <script>
+    const form = document.querySelector('#draft');
+    const result = document.querySelector('#result');
+    const status = document.querySelector('#status');
+    const error = document.querySelector('#error');
+    const select = document.querySelector('#audience');
+    const validate = document.querySelector('#validate');
+    const controls = document.querySelector('#controls');
+    const download = document.querySelector('#download');
+    let fixture = null;
+    function clearResult() {
+      fixture = null; result.textContent = ''; download.hidden = true; error.textContent = '';
+      status.textContent = 'Draft changed. Validate to refresh the preview.';
+    }
+    form.addEventListener('input', clearResult);
+    async function loadCatalogue() {
+      try {
+        const response = await fetch('/audiences');
+        if (!response.ok) throw new Error('Cannot load fixture catalogue.');
+        const catalogue = await response.json();
+        select.replaceChildren(...catalogue.audiences.map((a) => new Option(`${a.label} - AAM ${a.segmentId}`, a.key)));
+        select.disabled = false; validate.disabled = false;
+      } catch (e) { error.textContent = e.message; }
+    }
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault(); clearResult(); controls.disabled = true;
+      try {
+        const response = await fetch('/preview', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            environment: 'stage', audienceKey: select.value,
+            promotion: {
+              name: document.querySelector('#name').value, enabled: false, mode: 'automatic', code: null,
+              discount: { kind: 'percentage', basisPoints: Math.round(Number(document.querySelector('#percent').value) * 100) },
+              maxDiscountMinor: Math.round(Number(document.querySelector('#cap').value) * 100),
+              minimumMerchandiseMinor: null, target: { kind: 'all' }, startsAt: null, endsAt: null, audienceRestriction: null
+            }
+          })
+        });
+        const data = await response.json();
+        if (!response.ok || !data.ok) {
+          const fields = (data.error?.fields || []).map((f) => `${f.path}: ${f.message}`).join('; ');
+          throw new Error(`${data.error?.message || data.error || 'Draft rejected.'} ${fields}`);
+        }
+        fixture = data; result.textContent = JSON.stringify(data, null, 2); download.hidden = false;
+        status.textContent = 'Validated fixture only. Not saved. No financial authorization.';
+      } catch (e) { error.textContent = e.message; status.textContent = 'Preview failed. No fixture created.'; }
+      finally { controls.disabled = false; }
+    });
+    download.addEventListener('click', () => {
+      if (!fixture) return;
+      const url = URL.createObjectURL(new Blob([JSON.stringify(fixture, null, 2)], { type: 'application/json' }));
+      const link = document.createElement('a'); link.href = url; link.download = 'c02-audience-draft.fixture.json'; link.click();
+      URL.revokeObjectURL(url);
+    });
+    loadCatalogue();
+  </script>
+</body>
+</html>

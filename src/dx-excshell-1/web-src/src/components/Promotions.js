@@ -7,6 +7,7 @@ import {
 import { callAdmin, formatDate, formatMoney } from '../api'
 import { useShell } from '../shell-context'
 import { ErrorAlert, PageHeader, useAdminMutation, useAdminQuery } from './common'
+import AudienceDraftPreview from './AudienceDraftPreview'
 
 const PROMOTIONS = { endpoint: 'promotions' }
 const PAGE_SIZE = 50 // service maximum (wknd.promotions/v1 listMax)
@@ -134,6 +135,7 @@ export default function Promotions () {
         </TableBody>
       </TableView>
 
+      <AudienceDraftPreview />
       <RecoveryEmailRuns />
 
       <DialogContainer type='fullscreenTakeover' onDismiss={() => setEditing(null)}>

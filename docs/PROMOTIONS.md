@@ -19,6 +19,62 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 
 ## Management service
 
+### C02 audience draft fixture (not a live promotion API)
+
+Run `npm run preview:promotion-authoring`, then open `http://127.0.0.1:4178`.
+This local-only example uses the same validator as the Promotions admin's **Audience draft -
+fixture prototype** panel and the MCP tool. It needs no credentials, database, provider or deploy.
+Choose Climbing Interest or Climbing Planner, edit the draft terms, validate, and download the
+labelled fixture JSON. Stop the local server with Ctrl-C. `PORT` can select another local port.
+
+The Stage metadata catalogue maps `climbing-interest` to AAM `27507403` and `climbing-planner`
+to AAM `27507404`, both version 1. These bindings mirror the existing draft canonical registry
+in `origin/feat/audience-evidence-dto` at `f9c9181` (`lib/shopper-audiences.js`, `DRAFT_STAGE_ENTRIES`).
+Entries retain `status: "draft"` and `transport: "unverified"`; their source DPID and merge rule
+are administrative metadata, not proof of a working identity mapping.
+The catalogue has no evaluator, behavior rules, membership evidence or activation attestations.
+
+Read-only adapters (existing IMS/MCP authentication unchanged):
+
+- Admin `promotions.authoringAudiences`; MCP `list_promotion_authoring_audiences`.
+- Admin `promotions.previewAudienceDraft`; MCP `preview_audience_promotion_draft`.
+
+Example input to the preview operation/tool:
+
+```json
+{
+  "environment": "stage",
+  "audienceKey": "climbing-planner",
+  "promotion": {
+    "name": "Climbing planner demo",
+    "enabled": false,
+    "mode": "automatic",
+    "discount": { "kind": "percentage", "basisPoints": 1000 },
+    "maxDiscountMinor": 2500,
+    "target": { "kind": "all" },
+    "audienceRestriction": null
+  }
+}
+```
+
+Output is `schema: "wknd.promotion-authoring/fixture-v1"`, `mode: "fixture"`,
+`persisted: false`, `financialAuthorization: false`, and
+`activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
+`fixturePreview` contains separate `audience` metadata and the normalized, disabled `promotion`.
+It is **not** a live non-null restriction DTO and must not be submitted to `create_promotion`.
+Validation reuses the frozen definition validator for syntax, bounds, normalization and date order;
+it does not verify current catalogue references, coupon uniqueness, membership or financial eligibility.
+Unknown fields, raw audience IDs, other environments and `enabled: true` are explicitly rejected.
+Invalid preview arguments return `ok: false`, `error.code: "INVALID_DRAFT"` and field errors.
+
+**Commerce-owner handoff:** current master and the reviewed v2 selection branch remain null-only
+for audience authoring. The single required live contract change is a versioned canonical
+non-null audience restriction for **disabled draft** create/read/update, shared by admin/MCP.
+Draft authoring must not depend on a financial provider; enablement and financial evaluation must
+remain blocked without a verified provider. No shared engine, frozen v1 schema, provider or activation
+gate is changed by C02. The admin adapters/panel are source only until separately approved deployment;
+the local fixture preview works now without deploying them.
+
 ```js
 const { createPromotionService } = require('./lib/promotions');
 const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store), cursorKey, params });

@@ -44,6 +44,22 @@ test('deployment gate is off by default, but promotion reads remain available', 
   expect((await call('list_promotions', {})).body).toMatchObject({ apiVersion: 'wknd.promotions/v1', ok: true });
 });
 
+test('fixture authoring works with writes disabled and never persists; invalid Stage/draft input is a tool error', async () => {
+  const input = { environment: 'stage', audienceKey: 'climbing-planner', promotion: definition() };
+  const { body } = await call('preview_audience_promotion_draft', input, { MCP_PROMOTION_WRITES_ENABLED: undefined });
+  expect(body).toMatchObject({
+    ok: true, mode: 'fixture', persisted: false, financialAuthorization: false,
+    fixturePreview: { audience: { segmentId: '27507404' }, promotion: { enabled: false, audienceRestriction: null } },
+  });
+  const invalid = await call('preview_audience_promotion_draft', { ...input, environment: 'prod' });
+  expect(invalid.tool.isError).toBe(true);
+  expect(invalid.body.error.code).toBe('INVALID_DRAFT');
+  expect((await call('list_promotion_authoring_audiences', {})).body.audiences).toHaveLength(2);
+  expect(await store.collection('promotion_requests').countDocuments({})).toBe(0);
+  expect(await store.collection('promotions').countDocuments({ name: 'Gear deal' })).toBe(0);
+  expect(await store.collection('promotion_effects').countDocuments({})).toBe(0);
+});
+
 test('shared envelopes, normalization, replay, receipt reconciliation and identity are preserved', async () => {
   const key = randomUUID();
   const args = { idempotencyKey: key, promotion: definition() };

@@ -72,13 +72,53 @@ Open points for candidate A (each one blocks a Stage call):
 5. **Isolation.** The ECID binding must be per environment and per shopper. Logout, account switch
    and withdrawal must invalidate the stored binding.
 
+## Binding provider design (offline): `lib/target-id-binding.js`
+
+`createIdServiceBindingProvider({ orgId, dpid, consent, store })` implements candidate A as an offline
+design. Nothing wires it: there is no store collection, configuration, manifest entry or call site,
+and the diagnostic's default provider is still `unavailableBindingProvider`.
+
+- **Request:** `GET https://dpm.demdex.net/id?d_orgid=…&d_ver=2[&d_mid=<stored ECID>]&d_cid=<DPID>%01<verified sub>%011`.
+  - No traits, `d_cb`, cookies, browser identifiers or caller input.
+  - `redirect:'error'`, `credentials:'omit'`, with a timeout.
+- **Response:** `d_mid` must be 38 digits, `dcs_region` an integer ≥ 1, and `d_blob` non-empty and at
+  most **512 bytes**. 512 is the ID Service's own documented limit; the Target adapter keeps the
+  Delivery API's 1024-byte limit. On resync the returned ECID must equal the stored one.
+- **`id_sync_ttl`** is the documented re-synchronization interval, not membership expiry. It sets only
+  `resyncAt`. A missing or implausible value (over 30 days) means the binding is not reused.
+- **Consent:** a server-side `consent.allowed(shopperKey)` must return exactly `true` on every resolve.
+  - There is no default consent source.
+  - Any other answer, or a failure, deletes the stored binding and issues nothing.
+  - When consent returns, a new ECID is issued; the old binding is never reinstated.
+- **Persistence is required.** Without a store the provider is unconfigured, because minting an ECID
+  per call would churn device profiles. Writes are conditional on the read revision, and a lost race
+  is `unavailable`.
+- **Account switch and logout:** bindings are keyed by `shopperKey(AUTH0_ISSUER, sub)` and never sent
+  to a browser. Another shopper cannot read this binding, and logout needs no device action.
+- **Tests:** `test/target-id-binding.test.js` has 23 offline fixture cases, including the
+  end-to-end hand-off to the diagnostic adapter.
+
+Still unresolved (blocks any live call):
+
+- whether the authenticated `d_cid` call has DCS event or profile-linking side effects;
+- which merge rule the shared audiences use, for a server-minted ECID;
+- the effect of the server IP on region;
+- which server-side consent record is authoritative;
+- approval for a diagnostic-only binding collection.
+
 ## Activation prerequisites
 
-- The coordinator confirms that the activity exists and is saved and live in Stage only, plus the
-  client code, property token, mbox and offer shapes. No offer is persisted today, and no activity is
-  activated.
-- Binding candidate A is verified, or another supported path is chosen, and its provider is approved,
-  including any persistence.
+- Target configuration is confirmed read-only.
+  - Activity 689010 is saved and **inactive**: Default Workspace, mbox
+    `wknd-aam-stage-eligibility-v1`, property 1832 "AGS API". The activity's property dialog shows
+    the same `at_property` token.
+  - Offers 2377794 / 2377795 / 2377796 have exactly the contract keys.
+  - Analytics reporting goes to `ags050wkndaamstage`, for both the activity and its goal.
+  - Client code `adobeinternalags050`.
+  - The numeric workspace IDs differ (property 864785625, activity 26132544), which may be legacy or
+    product-profile IDs. The token association itself is verified.
+  - Activation is not approved.
+- Binding candidate A is verified and its provider, consent source and storage are approved.
 - Manifest entry: a Stage-only raw web action that verifies the Auth0 token with `lib/auth.js` and
   passes only claims. The deploy check must refuse a Production namespace when the diagnostic is
   enabled. This needs explicit approval.

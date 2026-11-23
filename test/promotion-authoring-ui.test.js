@@ -18,10 +18,10 @@ let renderer;
 const originalWindow = global.window;
 beforeAll(() => { global.window = { crypto: { randomUUID } }; });
 afterAll(() => { global.window = originalWindow; });
-beforeEach(() => {
+beforeEach(async () => {
   const api = createPromotionsAdmin({ store: createMemoryStore() });
   callAdmin.mockReset().mockImplementation(async (_ims, op, args) => api.handle({ kind: 'ims-operator', subject: 'author', orgId: 'test-org' }, op, args));
-  act(() => { renderer = create(React.createElement(AudienceDraftPreview)); });
+  await act(async () => { renderer = create(React.createElement(AudienceDraftPreview)); });
 });
 afterEach(() => { act(() => renderer.unmount()); });
 const root = () => renderer.root;
@@ -51,7 +51,7 @@ test('picker validates, persists, reopens, updates and deletes through the same 
   expect(JSON.parse(root().findByType('TextArea').props.value).draft).toMatchObject({ id: saved.draft.id, revision: 2, promotion: { name: 'New draft' } });
   await act(async () => button('Delete draft').props.onPress());
   expect(JSON.parse(root().findByType('TextArea').props.value)).toMatchObject({ deleted: true });
-  expect(callAdmin.mock.calls.every((call) => call[1].startsWith('promotions.drafts.'))).toBe(true);
+  expect(callAdmin.mock.calls.every((call) => call[1].startsWith('promotions.drafts.') || call[1] === 'promotions.authoringAudiences')).toBe(true);
 });
 
 test('service rejection and transport errors are visible, never success-shaped output', async () => {
@@ -77,10 +77,26 @@ test('opening a fixed coupon draft preserves non-edited terms and nullable cap o
       audienceRestriction: { environment: 'stage', key: 'climbing-interest', version: 1 },
     },
   });
+
   await act(async () => button('Load saved drafts').props.onPress());
   await act(async () => button('Open Fixed coupon draft').props.onPress());
   expect(root().findAllByType('NumberField')[0].props.label).toBe('Fixed discount (AUD)');
   act(() => root().findByType('TextField').props.onChange('Renamed fixed draft'));
   await act(async () => button('Save draft changes').props.onPress());
   expect(JSON.parse(root().findByType('TextArea').props.value).draft.promotion).toEqual({ ...created.draft.promotion, name: 'Renamed fixed draft' });
+});
+
+test('UI uses the server Production catalogue environment, never a hard-coded Stage restriction', async () => {
+  act(() => renderer.unmount());
+  const api = createPromotionsAdmin({ store: createMemoryStore(), namespace: '28538-wkndcommerce' });
+  callAdmin.mockImplementation(async (_ims, op, args) => api.handle({ kind: 'ims-operator', subject: 'author', orgId: 'test-org' }, op, args));
+  await act(async () => { renderer = create(React.createElement(AudienceDraftPreview)); });
+  expect(root().findAllByType('Radio')).toHaveLength(2);
+  await preview();
+  expect(callAdmin).toHaveBeenLastCalledWith(expect.any(Object), 'promotions.drafts.validate', expect.objectContaining({
+    promotion: expect.objectContaining({ enabled: false, audienceRestriction: { environment: 'production', key: 'climbing-interest', version: 1 } }),
+  }), { endpoint: 'promotions' });
+  expect(JSON.parse(root().findByType('TextArea').props.value)).toMatchObject({
+    financialAuthorization: false, activation: { blocked: true }, availability: { status: 'unavailable' },
+  });
 });

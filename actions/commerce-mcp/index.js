@@ -4,6 +4,7 @@ const { WebStandardStreamableHTTPServerTransport } = require('@modelcontextproto
 const { getStore } = require('../../lib/store');
 const { triggerPrerender } = require('../../lib/invoke');
 const { createCommerceServer } = require('../../lib/mcp-server');
+const { authoringEnvironment } = require('../../lib/promotion-authoring-environment');
 const {
   McpHttpError, requestHeaders, authenticateIntegration, checkOrigin,
 } = require('../../lib/mcp-auth');
@@ -74,6 +75,7 @@ function createMain({ openStore = getStore, logger = Logger('commerce-mcp', { le
         },
         context: {
           actor, correlationId, logger,
+          authoringEnvironment: authoringEnvironment(),
           promotionCursorKey: params.PROMOTION_CURSOR_KEY,
           promotionWritesEnabled: params.MCP_PROMOTION_WRITES_ENABLED === 'true',
           recoveryRedemptionVerified: params.RECOVERY_REDEMPTION_VERIFIED === 'true',

@@ -22,5 +22,35 @@
     "transport": "unverified",
     "sourceDpid": "1547309",
     "mergeRuleId": "1547344"
+  },
+  {
+    "key": "climbing-interest",
+    "label": "Climbing Interest",
+    "env": "production",
+    "version": 1,
+    "provider": "aam",
+    "segmentId": "27507403",
+    "status": "configured-reference",
+    "transport": "metadata-only",
+    "sourceDpid": "1547309",
+    "mergeRuleId": "1547344",
+    "targetAudienceId": "11256851",
+    "targetActivityId": "689041",
+    "targetMbox": "wknd-aam-production-eligibility-v1"
+  },
+  {
+    "key": "climbing-planner",
+    "label": "Climbing Planner",
+    "env": "production",
+    "version": 1,
+    "provider": "aam",
+    "segmentId": "27507404",
+    "status": "configured-reference",
+    "transport": "metadata-only",
+    "sourceDpid": "1547309",
+    "mergeRuleId": "1547344",
+    "targetAudienceId": "11256852",
+    "targetActivityId": "689041",
+    "targetMbox": "wknd-aam-production-eligibility-v1"
   }
 ]

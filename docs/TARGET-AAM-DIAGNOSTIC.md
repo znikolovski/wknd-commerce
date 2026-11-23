@@ -1,6 +1,7 @@
 #  Target AAM diagnostic (Stage / Production) — OFF by default
 
-Status: **implemented, inert, OFF by default. Not deployed.**
+Status: **Production deployed; person-alias capability explicitly approved for the demo rollout.
+Fresh manifest defaults remain OFF. Stage alias capability is unchanged/OFF.**
 - `actions/target-diagnostic` (manifest entry, deploy gate), `lib/target-diagnostic-action.js`,
   `lib/target-diagnostic.js`, `lib/target-id-binding.js`, `lib/target-binding-store.js` and
   `lib/id-linkage-consent.js` exist, with offline tests.
@@ -8,24 +9,37 @@ Status: **implemented, inert, OFF by default. Not deployed.**
   nothing.
 - Nothing calls Target, Audience Manager or the ID Service until the live acceptance gates below are
   verified and their flags are deliberately configured in the selected workspace.
-- Stage and Production are supported; neither is enabled by this change. Production approval is in
-  scope, not a blanket prohibition. No deployment, live calls or flag activation occurred.
+- Production alias approval is technical capability approval, not shopper consent. Only existing
+  authoritative `idLinkage` grants can issue bindings; client collection/personalization checks
+  remain independent. No grant or audience definition is created by rollout.
 - Legal review is not a project prerequisite. Wording-version configuration requires operational-owner
   approval, not an assertion of legal approval.
 
 ## What it asks and what the answer means
 
-### Public person-binding source contract (not live approval)
+### Public person-binding contract
 
 The raw web action `commerce/target-diagnostic` accepts authenticated POSTs with
 `{op:"person-binding"}`, `{op:"person-status"}` or `{op:"person-withdrawal"}`.
-The existing verified Auth0 bearer, exact Runtime environment, shopper allowlist
-and direct-shopper-only checks apply. No caller alias or grant is accepted.
+The existing verified Auth0 bearer, exact Runtime environment and shopper allowlist
+apply. In exact Production namespace `28538-wkndcommerce`, only `person-status`
+and `person-binding` also accept the existing signed Commerce assertion:
+`Authorization: Bearer <assertion>` plus `x-wknd-delegation: mcp`. The existing
+HS256 verifier checks configured issuer, `urn:wknd-commerce:storefront` audience,
+`identity_issuer`, `shop:cart`, at most 120 seconds and a single-use `jti`.
+Person operations additionally reject future issuance and expired assertions
+without Commerce's clock grace. All consent writers, withdrawal, diagnostics,
+retirement and semantic operations remain unavailable to delegated callers.
+Stage and other namespaces reject this delegated path. No Auth0 token exchange
+or wider bearer audience is required or introduced. No caller alias or grant is accepted.
 `person-status` reads only; `person-binding` atomically creates a stable random
 `wpa_` plus 32 lowercase hex person alias in `person_aliases_v1`, scoped by
 verified issuer/shopper and environment. It never substitutes an ECID or exposes
 the Auth0 subject. Source approval additionally requires
 `WKND_TARGET_PERSON_ALIAS_APPROVED=true`; it defaults OFF.
+The Production package opt-in inherits into the action; existing action inputs
+are not replaced with encrypted GET values. The selected Production deployment
+environment must retain the approved flag for later scoped deployments.
 
 Responses use `apiVersion:"wknd.person-binding/v1"`, `purpose:"idLinkage"`, `status`, `consent`,
 `binding` and `semanticAllowlist:[]`, plus the existing environment/evidence/
@@ -46,6 +60,13 @@ relinked or claimed migrated. The AAM collection adapter and canonical semantic
 rule mappings are **missing**: `person-event` returns 503
 `canonical-rule-unavailable`; no semantic names or args are approved.
 Neither navigation nor quiz completion is rewritten as a page view.
+The requested business intent is climbing-content interest and planning engagement,
+not necessarily successful generation. Genuine validated tool use, published quiz
+category or cart context may become engagement facts only when they map to the
+actual current rules for existing traits 27507401/27507402. A provider completion
+receipt is not a prerequisite for an engagement fact. Until the authorized rule
+export/update is available, the canonical allowlist remains empty; no invented
+parameters, fake planning success or financial evidence is emitted.
 
 - Existing **Stage** isolated diagnostic activity (Form-based / API, Default Workspace), mbox
   `wknd-aam-stage-eligibility-v1`, remote decisioning only (no on-device rules, no prefetch).
@@ -73,9 +94,10 @@ A decision is **not** audience evidence:
 
 ## Trust rules (enforced in code and tests)
 
-- Customer ID: always the Auth0-**verified** `sub`, sent as `customerIds:[{id, integrationCode:
-  'wkndCustomerId', authenticatedState:'authenticated'}]`. This matches the storefront's
-  `identityMap.wkndCustomerId` (raw Auth0 `sub`, `scripts/customer-identity.js`) and AAM source 1547309.
+- Customer ID in the approved Production alias path is the server-issued pseudonym
+  under `wkndCustomerId` / DPID1547309, never raw Auth0 `sub`. The verified subject
+  remains an internal mapping/consent key. Legacy raw-sub bindings are retirement
+  evidence, not a claim that existing memberships were migrated.
 - ECID, DCS `locationHint` and AAM `blob` come only from a server-side binding provider, marked
   `source:'server-issued'`. The binding is validated: ECID is 38 digits, the hint is an integer ≥ 1,
   the blob is non-empty and at most 1024 bytes.

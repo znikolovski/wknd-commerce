@@ -2,7 +2,7 @@
 
 The source defaults **OFF**. `WKND_STAGE_AAM_GENERAL_OFFERS_ENABLED=true` enables an explicitly
 mock-Commerce Stage benefit only when the configured Stage environment and exact Runtime namespace
-match. Production cannot enable this path, even with the flag set. This is not trusted financial
+match **28538-wkndcommerce-stage**. Production cannot enable this path, even with the flag set. This is not trusted financial
 Audience Manager authorization.
 
 `lib/stage-live-audience.js` reuses the authenticated customer, authoritative `idLinkage` grant,
@@ -23,8 +23,8 @@ copied to promotions or used as cart evidence. Real qualification is inspected a
 ```graphql
 query Planner($id: String!) {
   wkndPlannerOffer(cart_id: $id) {
-    kind status percent_off max_discount { value currency }
-    saving { value currency } current_saving { value currency } expires_at message
+    status percent_off max_discount { value currency }
+    saving { value currency } current_saving { value currency } expires_at
   }
 }
 ```
@@ -41,16 +41,31 @@ integer-cent allocation/GST. The automatic label is **Climbing planner gear bene
 welcome-back `offer_applied`. A change in effective selected savings updates the cart by its existing
 revision CAS and advances `wknd_cart_version`; stable reads do not. A stale reviewed version remains
 invalid. Production pricing and source-OFF behavior remain unchanged.
+Consumers determine actual application from that cart discount label/amount, not from Target
+membership or `current_saving`. Without a planner candidate, the original selection gate retains
+its existing precedence.
 
 ## Publication boundary
 
-Only `commerce/storefront-graphql` needs this runtime source and final-input configuration.
+Only `commerce/storefront-graphql` needs this runtime source.
 `schema/promotions.graphql` is the schema authority; `npm run schema:build` regenerates the storefront
 SDL. Native/LLM consumers use the query above and the normalized cart field.
 
 No changes/deployments to C01's MCP, secured admin, public admin sequence or validators, or to
 worker/webhook/diagnostic are required. Selective publication must retain their metadata and preserve
-storefront security/credentials. Never replay encrypted GET parameters as plaintext. Configuration
-updates require the complete authoritative original storefront inputs plus the explicit Stage
-overlay; missing unrelated gates must not be guessed. Upstream withdrawal, live qualification and
+storefront security/credentials. Never replay encrypted GET parameters as plaintext.
+
+The explicitly approved Stage release can opt in **without any Runtime parameter update**:
+`lib/stage-planner-release.js` accepts a server-bundle lexical constant
+`WKND_STAGE_PLANNER_RELEASE={enabled:true,parameters:approvedStageTargetSettings}`. The selective
+release prepends it to the server entry point, using the existing private diagnostic configuration
+authority (including the sole allowlist). No credential, subject or allowlist value belongs in Git.
+Only allowlisted Target-setting names are copied; Auth0, DB credentials,
+`RECOVERY_REDEMPTION_VERIFIED`, `PROMOTION_SELECTION` and every persisted Runtime input remain
+untouched. The actual system namespace must be exactly the Stage namespace above; request fields,
+environment labels and Production cannot activate this opt-in. Source/ordinary builds have no
+constant and remain OFF. Exec-only rollback to the ordinary source ZIP removes the release opt-in
+while preserving all parameters/security; a later cart read reconciles stale planner pricing.
+
+Upstream withdrawal, live qualification and
 cross-channel completeness are separate checks, not prerequisites for this mock wiring.

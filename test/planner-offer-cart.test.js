@@ -10,7 +10,7 @@ const CATALOG = require('../data/catalog.json');
 
 const SUB = 'auth0|synthetic-planner-cart';
 const ISSUER = 'https://example.auth0.com/';
-const NS = 'example-stage';
+const NS = '28538-wkndcommerce-stage';
 const GRANT = '11111111-2222-4333-8444-555555555555';
 const FIELDS = 'kind status coupon_code percent_off max_discount { value currency } saving { value currency } current_saving { value currency } expires_at message';
 const QUERY = `query($id:String!) {

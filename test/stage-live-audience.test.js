@@ -7,7 +7,7 @@ const { MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
 
 const SUB = 'auth0|synthetic-stage-demo';
 const ISSUER = 'https://example.auth0.com/';
-const NS = 'example-stage';
+const NS = '28538-wkndcommerce-stage';
 const KEY = shopperKey(ISSUER, SUB);
 const T0 = Date.UTC(2026, 10, 23);
 const GRANT = '11111111-2222-4333-8444-555555555555';

@@ -38,9 +38,9 @@ const pricey = simples.find((p) => priceOf(p.sku).regular >= 300) || simples.fin
 
 let store;
 let params;
-async function gql(query, variables = {}, { auth = true } = {}) {
+async function gql(query, variables = {}, { auth = true, factService } = {}) {
   const headers = auth ? { authorization: `Bearer ${TOKEN}` } : {};
-  const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify });
+  const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify, factService });
   return body;
 }
 
@@ -50,6 +50,44 @@ const APPLY = `mutation Apply($id: String!, $code: String!) { applyCouponToCart(
 const OFFER = 'query Offer($id: String!) { wkndRecoveryOffer(cart_id: $id) { status reason coupon_code percent_off max_discount { value } expires_at } }';
 const CLAIM = 'mutation Claim($id: String!) { claimWkndRecoveryOffer(cart_id: $id) { status reason coupon_code percent_off max_discount { value } expires_at } }';
 const PLACE = 'mutation Place($id: String!) { placeOrder(input: { cart_id: $id }) { errors { code message } orderV2 { number total { discounts { amount { value } } grand_total { value } } } } }';
+
+describe('facts-only post-persistence hooks', () => {
+  test('cart handoff sees committed state; unavailable telemetry does not undo the mutation', async () => {
+    const id = await customerCartId();
+    const handoff = jest.fn(async (cartId) => {
+      expect((await store.collection('carts').findOne({ id: cartId })).items[0].quantity).toBe(2);
+      return { status: 'unavailable' };
+    });
+    const body = await gql(ADD, { id, sku: cheap.sku, qty: 2 }, { factService: { handoff } });
+    expect(body.errors).toBeUndefined();
+    expect(handoff).toHaveBeenCalledWith(id);
+    expect((await store.collection('carts').findOne({ id })).items[0].quantity).toBe(2);
+  });
+
+  test.each([
+    PLACE,
+    'mutation($id:String!){setPaymentMethodAndPlaceOrder(input:{cart_id:$id,payment_method:{code:"wknd_demo_pay"}}){order{order_number}}}',
+  ])('both order paths anchor facts to durable insert, even if subsequent cart bookkeeping fails (%#)', async (query) => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    await readyForCheckout(id);
+    const afterOrder = jest.fn(async (cartId) => {
+      expect(await store.collection('orders').countDocuments({ customerSub: SUB })).toBe(1);
+      expect((await store.collection('carts').findOne({ id: cartId })).status).toBe('ordering');
+      return { status: 'unavailable' };
+    });
+    const carts = store.collection('carts');
+    const replace = carts.replaceOne.bind(carts);
+    jest.spyOn(carts, 'replaceOne').mockImplementation((filter, next) => {
+      if (next.status === 'ordered') throw new Error('mock bookkeeping failure');
+      return replace(filter, next);
+    });
+    const body = await gql(query, { id }, { factService: { handoff: async () => ({ status: 'disabled' }), afterOrder } });
+    expect(body.errors).toBeTruthy();
+    expect(afterOrder).toHaveBeenCalledWith(id);
+    expect(await store.collection('orders').countDocuments({ customerSub: SUB })).toBe(1);
+  });
+});
 
 async function customerCartId() {
   return (await gql('query { customerCart { id } }')).data.customerCart.id;

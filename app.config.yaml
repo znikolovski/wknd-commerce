@@ -21,6 +21,10 @@ application:
           HLX_ORG: $WKND_HLX_ORG
           HLX_SITE: $WKND_HLX_SITE
           HLX_ADMIN_API_KEY: $WKND_HLX_ADMIN_API_KEY
+          TARGET_PERSON_ALIAS_APPROVED: $WKND_TARGET_PERSON_ALIAS_APPROVED
+          MCP_DELEGATION_ISSUER: $WKND_MCP_DELEGATION_ISSUER
+          MCP_DELEGATION_SECRET: $WKND_MCP_DELEGATION_SECRET
+          MCP_DELEGATION_SECRET_PREVIOUS: $WKND_MCP_DELEGATION_SECRET_PREVIOUS
         actions:
           storefront-graphql:
             function: actions/storefront-graphql/index.js

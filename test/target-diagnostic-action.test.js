@@ -3,6 +3,7 @@
  * memory store, injected fetch (ID Service + Target), real Auth0 RS256 verification against a local JWKS.
  */
 const { generateKeyPair, exportJWK, SignJWT, createLocalJWKSet } = require('jose');
+const { randomUUID } = require('node:crypto');
 const { createMemoryStore } = require('../lib/store');
 const { shopperKey } = require('../lib/recovery-policy');
 const { verifyToken } = require('../lib/auth');
@@ -72,6 +73,7 @@ const offerBody = (marker, environment = 'stage', mbox = MBOX) => ({
 
 function harness({
   config = LIVE, ns = STAGE_NS, store = createMemoryStore(), onTarget, targetBody, retirementBody,
+  clock = () => T0,
 } = {}) {
   const lines = [];
   const logger = { info: (m) => lines.push(m), warn: (m) => lines.push(m), error: (m) => lines.push(m) };
@@ -97,7 +99,7 @@ function harness({
   const getStore = jest.fn(async () => store);
   const verify = jest.fn((token, cfg) => verifyToken(token, cfg, { jwks }));
   const handle = createTargetDiagnosticHandler({
-    getStore, verify, fetchImpl, logger, namespace: () => ns, now: () => T0,
+    getStore, verify, fetchImpl, logger, namespace: () => ns, now: clock,
   });
   const call = async (body, { token, headers = {}, method = 'post', extra = {} } = {}) => handle({
     ...config,
@@ -138,6 +140,124 @@ test('public person contract rejects caller identity and unapproved semantic eve
   expect(await h.call({ op: 'person-event', name: 'sherpa-search', args: {}, idempotencyKey: 'navigation' }, { token }))
     .toMatchObject({ statusCode: 503, body: { reason: 'canonical-rule-unavailable', semanticAllowlist: [] } });
   expect(h.fetchImpl).not.toHaveBeenCalled();
+});
+
+describe('delegated person transport', () => {
+  const secret = 'test-only-person-delegation-secret-32-bytes+';
+  const issuer = 'https://example.adobeio-static.net/api/v1/web/llm-apps/mcp';
+  const ns = '28538-wkndcommerce';
+  const config = {
+    ...LIVE,
+    TARGET_DIAG_ENVIRONMENT: 'production',
+    TARGET_DIAG_PRODUCTION_NAMESPACE: ns,
+    TARGET_PERSON_ALIAS_APPROVED: 'true',
+    MCP_DELEGATION_SECRET: secret,
+    MCP_DELEGATION_ISSUER: issuer,
+  };
+  const signed = (claims = {}, options = {}) => {
+    const issued = options.issued ?? Math.floor(T0 / 1000);
+    return new SignJWT({
+      identity_issuer: ISSUER, scope: 'shop:cart', jti: randomUUID(), ...claims,
+    })
+      .setProtectedHeader({ alg: 'HS256' }).setSubject(claims.sub ?? SUB)
+      .setIssuer(claims.iss ?? issuer).setAudience(claims.aud ?? 'urn:wknd-commerce:storefront')
+      .setIssuedAt(issued).setExpirationTime(issued + (options.lifetime ?? 60))
+      .sign(new TextEncoder().encode(options.secret ?? secret));
+  };
+  const call = (h, body, token) => h.call(body, { token, headers: { 'x-wknd-delegation': 'mcp' } });
+
+  test.each(['person-status', 'person-binding'])('%s resolves the signed principal without creating consent', async (op) => {
+    const h = harness({ config, ns });
+    await seedCustomer(h.store);
+    const before = await h.store.collection('customers').findOne({ sub: SUB });
+    const token = await signed();
+    expect(await call(h, { op }, token)).toMatchObject({
+      statusCode: 200,
+      body: { purpose: 'idLinkage', consent: 'absent', binding: null, financialAuthorization: false, semanticAllowlist: [] },
+    });
+    expect(h.verify).not.toHaveBeenCalled();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await h.store.collection('customers').findOne({ sub: SUB })).toEqual(before);
+    expect(await h.store.collection('person_aliases_v1').find({})).toEqual([]);
+    expect(await h.store.collection('marketing_consent_events').find({})).toEqual([]);
+    [SUB, token, secret].forEach((value) => expect(h.lines.join('\n')).not.toContain(value));
+  });
+
+  test('rejects a single-use assertion replay', async () => {
+    const h = harness({ config, ns });
+    const token = await signed();
+    expect((await call(h, { op: 'person-status' }, token)).statusCode).toBe(200);
+    expect(await call(h, { op: 'person-status' }, token))
+      .toMatchObject({ statusCode: 401, body: { reason: 'unauthenticated' } });
+  });
+
+  test.each([
+    ['wrong secret', {}, { secret: 'different-test-only-person-secret-32-bytes' }],
+    ['wrong issuer', { iss: 'https://other.example/mcp' }, {}],
+    ['wrong audience', { aud: 'https://other.example/api' }, {}],
+    ['wrong identity issuer', { identity_issuer: 'https://other.auth0.com/' }, {}],
+    ['missing scope', { scope: 'bookings:read' }, {}],
+    ['non-allowlisted subject', { sub: OTHER_SUB }, {}, 403],
+    ['excessive lifetime', {}, { lifetime: 121 }],
+    ['expired inside the Commerce grace period', {}, { lifetime: -1 }],
+    ['future issued time', {}, { issued: Math.floor(T0 / 1000) + 1 }],
+  ])('refuses %s', async (_, claims, options, status = 401) => {
+    const h = harness({ config, ns });
+    expect((await call(h, { op: 'person-binding' }, await signed(claims, options))).statusCode).toBe(status);
+    expect(await h.store.collection('person_aliases_v1').find({})).toEqual([]);
+    expect(await h.store.collection('customers').find({})).toEqual([]);
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' },
+    { op: 'consent', optIn: false },
+    { op: 'person-withdrawal' },
+    { op: 'consent-status' },
+    { op: 'decide' },
+    { op: 'person-event', name: 'planning', args: {} },
+    { op: 'retirement', step: 'submit' },
+  ])('refuses delegated $op before any storage or upstream work', async (body) => {
+    const h = harness({ config, ns });
+    expect(await call(h, body, await signed()))
+      .toMatchObject({ statusCode: 403, body: { reason: 'delegated-not-allowed' } });
+    expectUntouched(h);
+  });
+
+  test.each(['person-status', 'person-binding'])('rejects caller identity in %s before verification', async (op) => {
+    const h = harness({ config, ns });
+    expect(await call(h, { op, sub: OTHER_SUB }, await signed()))
+      .toMatchObject({ statusCode: 400, body: { reason: 'invalid-request' } });
+    expectUntouched(h);
+  });
+
+  test('keeps Stage and other namespaces closed to delegated person operations', async () => {
+    for (const [cfg, namespace] of [[{ ...LIVE, ...config, TARGET_DIAG_ENVIRONMENT: 'stage' }, STAGE_NS],
+      [{ ...config, TARGET_DIAG_PRODUCTION_NAMESPACE: PRODUCTION_NS }, PRODUCTION_NS]]) {
+      const h = harness({ config: cfg, ns: namespace });
+      expect((await call(h, { op: 'person-status' }, await signed())).statusCode).toBe(403);
+      expectUntouched(h);
+    }
+  });
+
+  test('does not accept an ordinary RS256 token as a signed Commerce assertion', async () => {
+    const h = harness({ config, ns });
+    expect((await call(h, { op: 'person-status' }, await auth0Token())).statusCode).toBe(401);
+    expect(h.verify).not.toHaveBeenCalled();
+  });
+
+  test('rejects an assertion that expires before the person response is exposed', async () => {
+    let current = T0;
+    const h = harness({ config, ns, clock: () => current });
+    const customers = h.store.collection('customers');
+    const findOne = customers.findOne.bind(customers);
+    jest.spyOn(customers, 'findOne').mockImplementation(async (...args) => {
+      const result = await findOne(...args);
+      current += 61000;
+      return result;
+    });
+    expect((await call(h, { op: 'person-status' }, await signed())).statusCode).toBe(401);
+  });
 });
 const expectUntouched = (h) => {
   expect(h.getStore).not.toHaveBeenCalled();

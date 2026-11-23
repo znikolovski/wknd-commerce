@@ -108,6 +108,43 @@ application:
             limits:
               timeout: 30000
               memorySize: 512
+          # Environment-bound Target AAM diagnostic + separate ID-linkage consent (no financial use).
+          # Optional inputs deploy empty = OFF; exact platform-verified namespace mapping is required.
+          # docs/TARGET-AAM-DIAGNOSTIC.md
+          target-diagnostic:
+            function: actions/target-diagnostic/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              AUTH0_ISSUER: $WKND_AUTH0_ISSUER
+              AUTH0_AUDIENCE: $WKND_AUTH0_AUDIENCE
+              TARGET_DIAG_ENABLED: $WKND_TARGET_DIAG_ENABLED
+              TARGET_DIAG_ENVIRONMENT: $WKND_TARGET_DIAG_ENVIRONMENT
+              TARGET_DIAG_STAGE_NAMESPACE: $WKND_TARGET_DIAG_STAGE_NAMESPACE
+              TARGET_DIAG_PRODUCTION_NAMESPACE: $WKND_TARGET_DIAG_PRODUCTION_NAMESPACE
+              TARGET_DIAG_TARGET_CONFIG_APPROVED: $WKND_TARGET_DIAG_TARGET_CONFIG_APPROVED
+              TARGET_DIAG_ALLOWED_ORIGINS: $WKND_TARGET_DIAG_ALLOWED_ORIGINS
+              TARGET_DIAG_SHOPPER_KEYS: $WKND_TARGET_DIAG_SHOPPER_KEYS
+              TARGET_DIAG_TIMEOUT_MS: $WKND_TARGET_DIAG_TIMEOUT_MS
+              TARGET_CLIENT_CODE: $WKND_TARGET_CLIENT_CODE
+              TARGET_PROPERTY_TOKEN: $WKND_TARGET_PROPERTY_TOKEN
+              TARGET_ID_LINKAGE_ENABLED: $WKND_TARGET_ID_LINKAGE_ENABLED
+              TARGET_ID_LINKAGE_WORDING_VERSIONS: $WKND_TARGET_ID_LINKAGE_WORDING_VERSIONS
+              TARGET_ID_BINDING_STORE_APPROVED: $WKND_TARGET_ID_BINDING_STORE_APPROVED
+              TARGET_ID_SERVICE_ENABLED: $WKND_TARGET_ID_SERVICE_ENABLED
+              TARGET_ID_RETIREMENT_ENABLED: $WKND_TARGET_ID_RETIREMENT_ENABLED
+              TARGET_ID_ORG_ID: $WKND_TARGET_ID_ORG_ID
+              TARGET_ID_DPID: $WKND_TARGET_ID_DPID
+              TARGET_ID_LEASE_MS: $WKND_TARGET_ID_LEASE_MS
+              TARGET_ID_TIMEOUT_MS: $WKND_TARGET_ID_TIMEOUT_MS
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              web-custom-options: true
+              final: true
+            limits:
+              timeout: 30000
+              memorySize: 256
           pdp-markup:
             function: actions/pdp-markup/index.js
             runtime: nodejs:22

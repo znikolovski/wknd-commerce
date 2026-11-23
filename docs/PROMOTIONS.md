@@ -239,6 +239,10 @@ Consent is per purpose and never bundled or inferred (Spam Act 2003 express cons
 - Delegated agents (the ChatGPT/LLM app) cannot change consent (`DIRECT_SIGN_IN_REQUIRED`).
 - A Brevo unsubscribe (webhook or blocked-contact sync) withdraws **every** purpose; hard bounces,
   complaints and blocks suppress the address for all sends.
+- ID linkage (Stage Target diagnostic) is a **separate, optional** purpose stored in `idLinkage`, not
+  `marketing.*`, and it is off by default. Email opt-ins never imply it. It is granted only through
+  `actions/target-diagnostic` by an explicit, verified, non-delegated sign-in with approved wording.
+  A Brevo unsubscribe also withdraws it and can never grant it. See docs/TARGET-AAM-DIAGNOSTIC.md.
 
 ### Admin Promotions screen (human operators)
 

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertDialog, Badge, Button, ButtonGroup, Cell, Checkbox, CheckboxGroup, Column, Content, DatePicker, Dialog, DialogContainer,
   Divider, Flex, Form, Heading, InlineAlert, NumberField, Radio, RadioGroup, Row, StatusLight, Switch, TableBody, TableHeader,
@@ -8,6 +8,7 @@ import { callAdmin, formatDate, formatMoney } from '../api'
 import { useShell } from '../shell-context'
 import { ErrorAlert, PageHeader, useAdminMutation, useAdminQuery } from './common'
 import AudienceDraftPreview from './AudienceDraftPreview'
+import BundleOpportunities from './BundleOpportunities'
 
 const PROMOTIONS = { endpoint: 'promotions' }
 const PAGE_SIZE = 50 // service maximum (wknd.promotions/v1 listMax)
@@ -17,7 +18,7 @@ const newKey = () => (window.crypto?.randomUUID ? window.crypto.randomUUID() : n
 /** Service envelopes report failures as { ok: false, error }; surface them as one message. */
 function serviceError (result) {
   if (!result || result.ok !== false) return null
-  const fields = (result.error?.fields || []).map((f) => `${f.path}: ${f.message || f.code}`).join('; ')
+  const fields = (Array.isArray(result.error?.fields) ? result.error.fields : []).map((f) => `${f.path}: ${f.message || f.code}`).join('; ')
   return `${result.error?.message || 'The promotion service rejected the request.'}${fields ? ` (${fields})` : ''}`
 }
 
@@ -27,6 +28,7 @@ const describeDiscount = (p) => (p.discount?.kind === 'percentage'
 
 const describeTarget = (t) => {
   if (!t || t.kind === 'all') return 'All products'
+  if (t.kind === 'bundle') return `Complete kit: ${t.components.map((c) => `${c.quantity} × ${c.sku}`).join(', ')}`
   return `${t.kind === 'skus' ? 'SKUs' : 'Categories'}: ${t.values.join(', ')}`
 }
 
@@ -70,6 +72,11 @@ export default function Promotions () {
   const categories = useAdminQuery('categories.list')
   const { mutate, pending } = useAdminMutation(PROMOTIONS)
   const [editing, setEditing] = useState(null)
+  const [approving, setApproving] = useState(null)
+  const saveRequest = useRef(null)
+  const saving = useRef(false)
+  const [unresolvedSave, setUnresolvedSave] = useState(false)
+  const [saveError, setSaveError] = useState(null)
   const listError = serviceError(list.data)
   const items = list.data?.items || []
 
@@ -86,6 +93,45 @@ export default function Promotions () {
       `${p.name} ${p.enabled ? 'disabled' : 'enabled'}`)
     list.reload()
     return done
+  }
+
+  const savePromotion = async (args) => {
+    if (saving.current) return
+    saving.current = true
+    setSaveError(null)
+    const existing = saveRequest.current
+    const request = existing || {
+      operation: editing.id ? 'update' : 'create',
+      args
+    }
+    saveRequest.current = request
+    setUnresolvedSave(true)
+    try {
+      const result = await mutate(
+        existing ? 'promotions.get' : `promotions.${request.operation}`,
+        existing
+          ? { request: { operation: request.operation, idempotencyKey: request.args.idempotencyKey } }
+          : request.args
+      )
+      if (result?.ok === true && result.committed === true && result.promotion?.id) {
+        saveRequest.current = null
+        setUnresolvedSave(false)
+        setEditing(null)
+        list.reload()
+        ToastQueue.positive(request.operation === 'update' ? 'Promotion saved' : 'Promotion created (disabled until you enable it)', { timeout: 4000 })
+      } else {
+        const cannotRetry = ['REQUEST_NOT_FOUND', 'IDEMPOTENCY_RECORD_EXPIRED'].includes(result?.error?.code)
+        if (result?.ok === false && result.committed === false && !cannotRetry) {
+          saveRequest.current = null
+          setUnresolvedSave(false)
+        }
+        setSaveError(new Error(serviceError(result) || 'The save outcome is unknown. Check the original request receipt before making another change.'))
+      }
+    } catch (error) {
+      setSaveError(new Error(`${error.message} The save outcome is unknown; check the original request receipt. Do not create a new request.`))
+    } finally {
+      saving.current = false
+    }
   }
 
   return (
@@ -124,7 +170,10 @@ export default function Promotions () {
               <Cell><StatusLight variant={p.enabled ? 'positive' : 'neutral'}>{p.enabled ? 'Enabled' : 'Disabled'}</StatusLight></Cell>
               <Cell>
                 <Flex gap='size-100' justifyContent='end'>
-                  <Switch isSelected={p.enabled} isDisabled={pending} onChange={() => toggle(p)} aria-label={`${p.enabled ? 'Disable' : 'Enable'} ${p.name}`}>
+                  <Switch isSelected={p.enabled} isDisabled={pending} onChange={() => {
+                    if (!p.enabled && p.target?.kind === 'bundle') setApproving(p)
+                    else toggle(p)
+                  }} aria-label={`${p.enabled ? 'Disable' : 'Enable'} ${p.name}`}>
                     {p.enabled ? 'On' : 'Off'}
                   </Switch>
                   <Button variant='secondary' onPress={() => setEditing(p)}>Edit</Button>
@@ -135,23 +184,37 @@ export default function Promotions () {
         </TableBody>
       </TableView>
 
+      <BundleOpportunities onSelect={setEditing} />
       <AudienceDraftPreview />
       <RecoveryEmailRuns />
 
-      <DialogContainer type='fullscreenTakeover' onDismiss={() => setEditing(null)}>
+      <DialogContainer onDismiss={() => setApproving(null)}>
+        {approving && (
+          <AlertDialog
+            title='Approve and enable this bundle?'
+            variant='confirmation'
+            primaryActionLabel='Enable bundle'
+            cancelLabel='Cancel'
+            onPrimaryAction={async () => {
+              const done = await toggle(approving)
+              if (done) setApproving(null)
+            }}
+          >
+            {`${describeDiscount(approving)} applies to one complete kit, not extra quantities or unrelated products. Stock, quoted prices and expiry are rechecked by the server. The quote expires ${formatDate(approving.target.quoteExpiresAt)}. Demo sales do not establish margin or uplift; Aero reservations remain separate.`}
+          </AlertDialog>
+        )}
+      </DialogContainer>
+
+      <DialogContainer type='fullscreenTakeover' onDismiss={() => { if (!saveRequest.current) setEditing(null) }}>
         {editing && (
           <PromotionEditor
             promotion={editing.id ? editing : null}
+            preset={editing}
             categories={categories.data?.items || []}
             pending={pending}
-            onSave={async (args) => {
-              const op = editing.id ? 'promotions.update' : 'promotions.create'
-              const done = await run(op, args, editing.id ? 'Promotion saved' : 'Promotion created (disabled until you enable it)')
-              if (done) {
-                setEditing(null)
-                list.reload()
-              }
-            }}
+            unresolvedSave={unresolvedSave}
+            saveError={saveError}
+            onSave={savePromotion}
             onCancel={() => setEditing(null)}
           />
         )}
@@ -160,9 +223,11 @@ export default function Promotions () {
   )
 }
 
-function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) {
-  const p = promotion || {}
+export function PromotionEditor ({ promotion, preset, categories, pending, unresolvedSave, saveError, onSave, onCancel }) {
+  const p = promotion || preset || {}
   const isProtected = p.managementClass === 'protected-recovery'
+  const newBundle = !promotion && p.target?.kind === 'bundle'
+  const bundle = p.target?.kind === 'bundle'
   const [name, setName] = useState(p.name || '')
   const [mode, setMode] = useState(p.mode || 'coupon')
   const [code, setCode] = useState(p.code || '')
@@ -182,7 +247,7 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
 
   const definition = () => ({
     name: name.trim(),
-    enabled,
+    enabled: newBundle ? false : enabled,
     mode,
     code: mode === 'coupon' ? code.trim().toUpperCase() : null,
     discount: kind === 'percentage'
@@ -190,15 +255,18 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
       : { kind: 'fixed', amountMinor: Math.round(amount * 100), currency: 'AUD' },
     maxDiscountMinor: minorOrNull(cap),
     minimumMerchandiseMinor: minorOrNull(minimum),
-    target: targetKind === 'all'
-      ? { kind: 'all' }
-      : { kind: targetKind, values: targetKind === 'categories' ? targetCategories : skus.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean) },
+    target: targetKind === 'bundle'
+      ? { ...p.target }
+      : targetKind === 'all'
+        ? { kind: 'all' }
+        : { kind: targetKind, values: targetKind === 'categories' ? targetCategories : skus.split(/[\s,]+/).map((s) => s.trim().toUpperCase()).filter(Boolean) },
     startsAt: from ? toIso(from) : (promotion ? p.startsAt : null),
     endsAt: to ? toIso(to, true) : (promotion ? p.endsAt : null),
-    audienceRestriction: null
+    audienceRestriction: p.audienceRestriction ?? null
   })
 
   const save = () => {
+    if (unresolvedSave) return onSave()
     const args = { promotion: definition(), idempotencyKey: newKey() }
     if (promotion) Object.assign(args, { id: p.id, expectedRevision: p.revision })
     return onSave(args)
@@ -215,7 +283,9 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
             <Content>The discount, cap, code and eligibility are fixed by the recovery policy (one use per shopper, server-verified inactive carts). Only the name and status can change here.</Content>
           </InlineAlert>
         )}
-        <Form aria-label='Promotion' maxWidth='size-6000' isDisabled={pending} onSubmit={(e) => { e.preventDefault(); setConfirm(true) }}>
+        <ErrorAlert error={saveError} title='Promotion save failed' />
+        {unresolvedSave && <Text>The original request is retained. Check its receipt before editing or closing this draft; a missing or expired receipt does not permit a new write.</Text>}
+        <Form aria-label='Promotion' maxWidth='size-6000' isDisabled={pending || unresolvedSave} onSubmit={(e) => { e.preventDefault(); setConfirm(true) }}>
           <TextField label='Name' isRequired value={name} onChange={setName} maxLength={120} />
           <RadioGroup label='Type' orientation='horizontal' value={mode} onChange={setMode} isDisabled={isProtected}>
             <Radio value='coupon'>Coupon code</Radio>
@@ -233,10 +303,11 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
             <NumberField label='Maximum discount (optional)' minValue={0.01} step={0.01} value={cap} onChange={setCap} formatOptions={{ style: 'currency', currency: 'AUD' }} isDisabled={isProtected} />
             <NumberField label='Minimum spend (optional)' minValue={0.01} step={0.01} value={minimum} onChange={setMinimum} formatOptions={{ style: 'currency', currency: 'AUD' }} isDisabled={isProtected} />
           </Flex>
-          <RadioGroup label='Applies to' orientation='horizontal' value={targetKind} onChange={setTargetKind} isDisabled={isProtected}>
+          <RadioGroup label='Applies to' orientation='horizontal' value={targetKind} onChange={setTargetKind} isDisabled={isProtected || bundle}>
             <Radio value='all'>All products</Radio>
             <Radio value='categories'>Categories</Radio>
             <Radio value='skus'>Specific SKUs</Radio>
+            <Radio value='bundle' isDisabled={p.target?.kind !== 'bundle'}>Complete bundle (from investigation)</Radio>
           </RadioGroup>
           {targetKind === 'categories' && (
             <CheckboxGroup label='Categories (subcategories included)' value={targetCategories} onChange={setTargetCategories} isDisabled={isProtected}>
@@ -244,11 +315,20 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
             </CheckboxGroup>
           )}
           {targetKind === 'skus' && <TextArea label='SKUs' value={skus} onChange={setSkus} isDisabled={isProtected} description='Comma or space separated; product SKUs include all variants.' />}
+          {targetKind === 'bundle' && (
+            <InlineAlert variant='info'>
+              <Heading>Every quoted component is required</Heading>
+              <Content>
+                <Text>{describeTarget(p.target)}</Text>
+                <Text>{` One kit only; extra quantities and other products are not discounted. Quote expires ${formatDate(p.target.quoteExpiresAt)}. Refresh the investigation before saving or enabling an expired or changed quote. New bundle proposals always stay disabled until explicitly approved.`}</Text>
+              </Content>
+            </InlineAlert>
+          )}
           <Flex gap='size-200' wrap>
             <DatePicker label={`Starts (UTC)${p.startsAt ? `, now ${dateOf(p.startsAt)}` : ''}`} value={from} onChange={setFrom} isDisabled={isProtected} />
             <DatePicker label={`Ends (UTC)${p.endsAt ? `, now ${dateOf(p.endsAt)}` : ''}`} value={to} onChange={setTo} isDisabled={isProtected} />
           </Flex>
-          <Switch isSelected={enabled} onChange={setEnabled}>{enabled ? 'Enabled — shoppers can get this offer' : 'Disabled (draft)'}</Switch>
+          <Switch isSelected={newBundle ? false : enabled} onChange={setEnabled} isDisabled={bundle}>{enabled && !newBundle ? 'Enabled — shoppers can get this offer' : 'Disabled (draft)'}</Switch>
           <Text>Sale prices apply first; then the single promotion with the highest saving for the cart.</Text>
         </Form>
         <DialogContainer onDismiss={() => setConfirm(false)}>
@@ -256,19 +336,19 @@ function PromotionEditor ({ promotion, categories, pending, onSave, onCancel }) 
             <AlertDialog
               title={promotion ? 'Save changes?' : 'Create promotion?'}
               variant='confirmation'
-              primaryActionLabel={promotion ? 'Save' : 'Create'}
+              primaryActionLabel={unresolvedSave ? 'Check saved request' : promotion ? 'Save' : 'Create'}
               cancelLabel='Cancel'
               onPrimaryAction={save}
             >
-              {enabled ? 'This offer will be live for shoppers as soon as it is saved.' : 'The offer stays disabled until you enable it.'}
+              {unresolvedSave ? 'This is a read-only lookup using the original request key, not another save.' : enabled && !newBundle ? 'This offer will be live for shoppers as soon as it is saved.' : 'The offer stays disabled until you enable it.'}
             </AlertDialog>
           )}
         </DialogContainer>
       </Content>
       <ButtonGroup>
-        <Button variant='secondary' onPress={onCancel}>Cancel</Button>
-        <Button variant='accent' onPress={() => setConfirm(true)} isPending={pending} isDisabled={!name.trim() || (mode === 'coupon' && !code.trim())}>
-          {promotion ? 'Save' : 'Create'}
+        <Button variant='secondary' onPress={onCancel} isDisabled={pending || unresolvedSave}>Cancel</Button>
+        <Button variant='accent' onPress={() => { if (unresolvedSave) save(); else setConfirm(true) }} isPending={pending} isDisabled={pending || !name.trim() || (mode === 'coupon' && !code.trim())}>
+          {unresolvedSave ? 'Check saved request' : promotion ? 'Save' : 'Create'}
         </Button>
       </ButtonGroup>
     </Dialog>
@@ -291,7 +371,7 @@ function RecoveryEmailRuns () {
   return (
     <View borderWidth='thin' borderColor='gray-300' borderRadius='medium' padding='size-250'>
       <Heading level={2} marginTop={0}>Cart reminder emails</Heading>
-      <Text>Runs are requested here or by CX Coworker and must be approved by a different person. Sending is not available from this screen.</Text>
+      <Text>Enabled automatic reminders run on the server schedule without a manual request or approval. The controls below are for additional manual runs, which require approval by a different person. Sending is not available from this screen.</Text>
       <ErrorAlert error={status.error || runs.error} onRetry={reload} />
       {s && (
         <Flex gap='size-300' wrap marginY='size-200'>

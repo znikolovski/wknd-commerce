@@ -19,6 +19,30 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 
 ## Management service
 
+### Bundle investigation in the admin UI
+
+The Promotions screen performs an IMS-protected `promotions.bundleOpportunities` read.
+It displays dated, bounded demo-order evidence and current quoted inventory, not proven
+commercial uplift, surplus or margin. Invalid evidence and quotes are explicit errors;
+expired quotes cannot be selected, including when expiry occurs after the screen renders.
+
+Choosing an opportunity copies every quoted SKU, quantity and integer AUD unit price into
+a complete-bundle proposal. The 5% starting discount is an editable example, not financial
+approval. New bundles are always saved disabled. Existing bundle targets and quotes are
+preserved on full replacement; enabling requires the separate, explicit confirmation and
+the current revision. The server rechecks inventory, prices and quote expiry. Aero remains
+a separate demo booking; this UI does not reserve real seats or combine reservations.
+
+An uncertain create/update retains the original UUID and freezes the editor. **Check saved
+request** performs only `promotions.get` with
+`{ request: { operation: "create" | "update", idempotencyKey } }`. Missing, expired or
+unresolved receipts never authorize a fresh write. A committed receipt completes the save;
+an explicit, proven no-commit rejection permits correction. Backend support for this
+pass-through must be installed before publishing the UI.
+
+Enabled automatic cart reminders run on the server schedule without manual approval.
+Manual-run controls remain separate and require approval by a different person.
+
 ### C01 restricted draft authoring (`wknd.promotion-drafts/v2`)
 
 The additive draft service in `lib/promotion-drafts.js` stores metadata in

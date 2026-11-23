@@ -16,6 +16,7 @@ const {
   migrateLegacyPromotions, createPromotionService, loadPromotionRuntime, LEGACY_SEEDS,
 } = require('../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../lib/recovery-policy');
+const { bundleOpportunities } = require('../lib/bundles');
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
 const AUTH0_ISSUER = 'https://example.auth0.com/';
@@ -139,6 +140,48 @@ beforeEach(async () => {
   store = createMemoryStore();
   params = READY;
   await importCatalog(store, CATALOG, { replace: true });
+});
+
+test.each(['placeOrder', 'setPaymentMethodAndPlaceOrder'])('bundle attribution persists through %s using fresh exact-variant prices', async (operation) => {
+  await migrateLegacyPromotions(store);
+  const cat = await loadCatalog(store);
+  const [opportunity] = (await bundleOpportunities(store, {}, { catalog: async () => cat })).opportunities;
+  const actor = { actor: { kind: 'ims-operator', subject: 'op', orgId: 'ORG@AdobeOrg' }, correlationId: crypto.randomUUID() };
+  const service = createPromotionService({ store, loadCatalog: () => loadCatalog(store, { fresh: true }) });
+  const promotion = {
+    name: 'Fixture kit', enabled: false, mode: 'automatic', code: null,
+    discount: { kind: 'percentage', basisPoints: 1000 }, maxDiscountMinor: null, minimumMerchandiseMinor: null,
+    target: {
+      kind: 'bundle', bundleId: opportunity.bundleId, experimentId: 'fixture-kit',
+      currency: 'AUD', quoteExpiresAt: opportunity.quoteExpiresAt, safetyBuffer: opportunity.safetyBuffer,
+      components: opportunity.components.map(({ sku, quantity, unitPriceMinor }) => ({ sku, quantity, unitPriceMinor })),
+    },
+    startsAt: null, endsAt: null, audienceRestriction: null,
+  };
+  const created = await service.createPromotion(actor, { idempotencyKey: crypto.randomUUID(), promotion });
+  expect(created.ok).toBe(true);
+  expect(await service.updatePromotion(actor, {
+    id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(), promotion: { ...promotion, enabled: true },
+  })).toMatchObject({ ok: true });
+  const id = await customerCartId();
+  for (const c of opportunity.components) {
+    // eslint-disable-next-line no-await-in-loop
+    expect((await gql(ADD, { id, sku: c.sku, qty: c.quantity })).errors).toBeUndefined();
+  }
+  await readyForCheckout(id);
+  const metadata = 'wknd_bundle_id wknd_experiment_id';
+  const preview = await gql(`query($id:String!){cart(cart_id:$id){prices{discounts{${metadata}}}}}`, { id });
+  expect(preview.data.cart.prices.discounts).toEqual([{
+    wknd_bundle_id: opportunity.bundleId, wknd_experiment_id: 'fixture-kit',
+  }]);
+  const input = operation === 'placeOrder' ? 'cart_id:$id' : 'cart_id:$id,payment_method:{code:"wknd_demo_pay"}';
+  const result = await gql(`mutation($id:String!){${operation}(input:{${input}}){errors{code} orderV2{number total{discounts{${metadata}}}}}}`, { id });
+  expect(result.errors).toBeUndefined();
+  expect(result.data[operation].errors).toEqual([]);
+  expect(result.data[operation].orderV2.total.discounts).toEqual(preview.data.cart.prices.discounts);
+  expect((await store.collection('orders').findOne({ cartId: id })).promotion).toMatchObject({
+    bundleId: opportunity.bundleId, experimentId: 'fixture-kit', componentSkus: opportunity.components.map((c) => c.sku),
+  });
 });
 
 describe('generic coupons through the shared engine', () => {

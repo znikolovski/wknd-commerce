@@ -1,11 +1,16 @@
 extend type Query {
   """
   Signed-in shopper's cart-recovery offer status for one of their carts. Server-evaluated
-  operational cohort (inactive 24h to 7 days, no purchase since); read-only.
+  operational cohort (inactive 55 minutes to 7 days, no purchase since); read-only.
   """
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
   "Stage mock-Commerce planner benefit; automatic selection, no claim/apply mutation."
   wkndPlannerOffer(cart_id: String!): WkndRecoveryOffer!
+}
+
+extend type Discount {
+  wknd_bundle_id: String
+  wknd_experiment_id: String
 }
 
 extend type Mutation {

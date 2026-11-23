@@ -395,29 +395,38 @@ Sending is done by `promotions-worker` via `executeNextApprovedRun`:
   With the explicitly approved `RECOVERY_EMAIL_AUTOMATION_ENABLED=true`, an idle worker creates
   one bounded automatic run per five-minute window. Normal manual runs still require independent
   human approval; automatic runs are visibly marked `automatic`, not fabricated human approvals.
-  Consent, pause, verified offer, suppression sync, allowlist, daily budget and episode deduplication
+  Consent, pause, verified offer, suppression sync, recipient mode, daily budget and episode deduplication
   remain enforced. The email inactivity threshold is **24 hours through 7 days**, not the separate
   one-hour CartAbandoners audience. Financial recovery remains **10%, capped at AUD25**.
 - Without `BREVO_API_KEY` it does nothing (`not-configured`).
 - While paused it returns `skipped/PAUSED` and the run stays approved until it expires.
-- The worker never receives `RECOVERY_EMAIL_ALLOWLIST_DISABLED`, so deployed sends are always
-  limited to the allowlist. With an empty allowlist a run completes with zero sends.
+- The default recipient mode is allowlist-only. An empty allowlist still sends nothing unless
+  normal-send mode is explicitly enabled with `RECOVERY_EMAIL_ALLOWLIST_DISABLED=true`.
+  Production has that explicit approved default; Stage and ordinary source execution do not.
 - Set `WKND_BREVO_API_KEY` in the deploy `.env` (git-ignored); never commit or paste it.
 
 ### Production automatic email and transactional order receipts
 
 The approved Production namespace `28538-wkndcommerce` has non-secret email defaults in
-`lib/email-config.js`: automatic recovery enabled, cart destination
+`lib/email-config.js`: automatic recovery enabled, normal-send mode explicitly enabled with
+`RECOVERY_EMAIL_ALLOWLIST_DISABLED=true`, cart destination
 `https://wknd-adventures.run.place/shop/cart`, and receipts from the verified
 `WKND Adventures <hello@wknd-adventures.run.place>` sender. These defaults never apply in
 Stage; existing Runtime inputs override them. The API key remains an existing encrypted input.
+Production no longer restricts reminders to the retained pilot allowlist entries: ordinary
+signed-in cart owners are automatically eligible after explicit recovery-email opt-in, subject to
+the unchanged 24h–7d inactivity window, verified offer/ownership, suppression/unsubscribe checks,
+no intervening purchase, one email per episode, pause switch, 50/day budget and 50/run maximum.
+No manual campaign enrollment or individual run approval is needed for automatic runs.
+An explicit Runtime input `RECOVERY_EMAIL_ALLOWLIST_DISABLED=false` can restore pilot mode.
 An active `promotions-worker-rule` must connect the `promotions-worker-tick` alarm
 (`*/5 * * * *`, `/whisk.system/alarms/alarm`) to this namespace's `commerce/promotions-worker`.
 
 The atomic order insert now includes `emailConfirmation.state=pending`. This is the outbox:
 failed inserts create no email; subsequent cart/effect failures cannot lose an inserted order's
 receipt. The same worker sends receipts on its next alarm (normally within five minutes), for
-guests and signed-in shoppers, without marketing consent or recovery pause/approval gates.
+guests and signed-in shoppers, without marketing consent, the marketing recipient allowlist,
+or recovery pause/approval gates.
 Only new orders with this outbox field are eligible: deployment does **not** backfill historical mail.
 Receipt content uses persisted line totals, discounts, GST, shipping and grand total; no repricing,
 membership calculations or catalog lookups occur. It states no payment was taken/nothing ships.

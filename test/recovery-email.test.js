@@ -16,6 +16,7 @@ const {
   createRecoveryEmail, handleBrevoWebhook, executeNextApprovedRun, allowlisted,
 } = require('../lib/recovery-email');
 const { BrevoError } = require('../lib/brevo');
+const { emailParams } = require('../lib/email-config');
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
 const HOUR = 3600 * 1000;
@@ -95,6 +96,31 @@ describe('preference', () => {
 describe('approved automatic schedule', () => {
   const params = { ...PARAMS, BREVO_API_KEY: 'offline', RECOVERY_EMAIL_AUTOMATION_ENABLED: 'true' };
   const run = (p = params) => executeNextApprovedRun({ store, params: p, clock, createClient: () => brevo });
+
+  test('Production normal-send mode automatically admits ordinary opted-in recipients, not unconsented, suppressed or purchased shoppers', async () => {
+    const namespace = process.env.__OW_NAMESPACE;
+    let production;
+    try {
+      process.env.__OW_NAMESPACE = '28538-wkndcommerce';
+      production = emailParams(params);
+    } finally {
+      if (namespace === undefined) delete process.env.__OW_NAMESPACE;
+      else process.env.__OW_NAMESPACE = namespace;
+    }
+    await enableOffer();
+    await createRecoveryEmail({ store, params: production, clock }).resume();
+    await shopper('auth0|ordinary', 'ordinary@example.net');
+    await shopper('auth0|unconsented', 'unconsented@example.net', { optIn: false });
+    await shopper('auth0|suppressed', 'suppressed@example.net');
+    await shopper('auth0|purchased', 'purchased@example.net');
+    await store.collection('orders').insertOne({ customerSub: 'auth0|purchased', createdAt: new Date(NOW).toISOString() });
+    blocked = [{ email: 'suppressed@example.net', reason: { code: 'hardBounce' } }];
+    expect(await run(production)).toMatchObject({ state: 'completed', sent: 1 });
+    expect(sent.map((message) => message.to.email)).toEqual(['ordinary@example.net']);
+    expect(await createRecoveryEmail({ store, params: production, clock }).status()).toMatchObject({
+      allowlistEnabled: false, dailyBudget: 50,
+    });
+  });
 
   test('automatically sends only in the unchanged 24h..7d window, once per episode', async () => {
     await enableOffer();

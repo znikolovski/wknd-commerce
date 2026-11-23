@@ -392,11 +392,52 @@ nothing (`SUPPRESSION_SYNC_FAILED`) and stays approved. The webhook only shorten
 Sending is done by `promotions-worker` via `executeNextApprovedRun`:
 
 - Each tick (~5 min) it executes at most the **oldest approved** run, using every guard above.
+  With the explicitly approved `RECOVERY_EMAIL_AUTOMATION_ENABLED=true`, an idle worker creates
+  one bounded automatic run per five-minute window. Normal manual runs still require independent
+  human approval; automatic runs are visibly marked `automatic`, not fabricated human approvals.
+  Consent, pause, verified offer, suppression sync, allowlist, daily budget and episode deduplication
+  remain enforced. The email inactivity threshold is **24 hours through 7 days**, not the separate
+  one-hour CartAbandoners audience. Financial recovery remains **10%, capped at AUD25**.
 - Without `BREVO_API_KEY` it does nothing (`not-configured`).
 - While paused it returns `skipped/PAUSED` and the run stays approved until it expires.
 - The worker never receives `RECOVERY_EMAIL_ALLOWLIST_DISABLED`, so deployed sends are always
   limited to the allowlist. With an empty allowlist a run completes with zero sends.
 - Set `WKND_BREVO_API_KEY` in the deploy `.env` (git-ignored); never commit or paste it.
+
+### Production automatic email and transactional order receipts
+
+The approved Production namespace `28538-wkndcommerce` has non-secret email defaults in
+`lib/email-config.js`: automatic recovery enabled, cart destination
+`https://wknd-adventures.run.place/shop/cart`, and receipts from the verified
+`WKND Adventures <hello@wknd-adventures.run.place>` sender. These defaults never apply in
+Stage; existing Runtime inputs override them. The API key remains an existing encrypted input.
+An active `promotions-worker-rule` must connect the `promotions-worker-tick` alarm
+(`*/5 * * * *`, `/whisk.system/alarms/alarm`) to this namespace's `commerce/promotions-worker`.
+
+The atomic order insert now includes `emailConfirmation.state=pending`. This is the outbox:
+failed inserts create no email; subsequent cart/effect failures cannot lose an inserted order's
+receipt. The same worker sends receipts on its next alarm (normally within five minutes), for
+guests and signed-in shoppers, without marketing consent or recovery pause/approval gates.
+Only new orders with this outbox field are eligible: deployment does **not** backfill historical mail.
+Receipt content uses persisted line totals, discounts, GST, shipping and grand total; no repricing,
+membership calculations or catalog lookups occur. It states no payment was taken/nothing ships.
+
+Receipts use a conditional `pending → sending → sent` transition. Definite HTTP429 rejections
+retry no earlier than five minutes later. Other definite rejections are `failed`; ambiguous
+network/5xx outcomes and sends left in progress over ten minutes become `unknown` and require
+operator investigation, never blind retries. Thus duplicate receipt attempts are suppressed,
+but provider delivery cannot be guaranteed exactly once across ambiguous network outcomes.
+
+Private namespace-authenticated `promotions-worker` invocation with `{emailStatusOnly:true}`
+returns aggregate readiness and a read-only Brevo account/relay check without customer identities.
+`{emailPaused:true|false}` changes only the marketing recovery pause switch; it does not execute
+a send or affect transactional receipts. Never expose this action as a web action.
+
+Build only `commerce/storefront-graphql` and `commerce/promotions-worker`. Publish **exec-only**
+updates, retaining installed parameters, annotations and limits, including opaque encrypted inputs.
+Preserve the installed storefront's `WKND_STAGE_PLANNER_RELEASE` lexical prefix exactly (Production
+Planner/per-cart facts ON; Stage-only aggregate timer remains OFF). Never replay encrypted GET
+parameter values in a PUT, run a broad app deploy, or modify unrelated actions/packages.
 
 ### Marketing consent purposes
 

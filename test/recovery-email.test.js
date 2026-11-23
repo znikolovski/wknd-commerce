@@ -92,6 +92,35 @@ describe('preference', () => {
   });
 });
 
+describe('approved automatic schedule', () => {
+  const params = { ...PARAMS, BREVO_API_KEY: 'offline', RECOVERY_EMAIL_AUTOMATION_ENABLED: 'true' };
+  const run = (p = params) => executeNextApprovedRun({ store, params: p, clock, createClient: () => brevo });
+
+  test('automatically sends only in the unchanged 24h..7d window, once per episode', async () => {
+    await enableOffer();
+    await createRecoveryEmail({ store, params, clock }).resume();
+    await shopper('auth0|ava', 'ava@example.com', { idleHours: 30 });
+    await shopper('auth0|ben', 'ben@example.com', { idleHours: 1 });
+    expect(await run()).toMatchObject({ state: 'completed', sent: 1 });
+    expect(await run()).toEqual({ state: 'idle' });
+    expect(await executeNextApprovedRun({
+      store, params, clock: () => NOW + 6 * 60 * 1000, createClient: () => brevo,
+    })).toMatchObject({ state: 'completed', sent: 0 });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].params).toMatchObject({ PERCENT_OFF: 10, MAX_DISCOUNT: 25 });
+  });
+
+  test('pause and missing configuration never create automatic runs or send', async () => {
+    await enableOffer();
+    await shopper('auth0|ava', 'ava@example.com');
+    expect(await run()).toEqual({ state: 'skipped', code: 'PAUSED' });
+    await createRecoveryEmail({ store, params, clock }).resume();
+    expect(await run({ ...params, SHOP_CART_URL: '' })).toEqual({ state: 'not-configured' });
+    expect(await store.collection('recovery_email_runs').countDocuments({})).toBe(0);
+    expect(sent).toHaveLength(0);
+  });
+});
+
 describe('operator workflow', () => {
   test('status is aggregate only and paused by default', async () => {
     await shopper('auth0|ava', 'ava@example.com');
@@ -104,6 +133,7 @@ describe('operator workflow', () => {
         inactiveCarts: 3, optedIn: 2, notAllowlisted: 1, eligible: 1, suppressed: 0, alreadyEmailed: 0,
       },
     });
+
     expect(JSON.stringify(status)).not.toMatch(/@example\.com|auth0\|/);
   });
 

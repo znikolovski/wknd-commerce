@@ -100,7 +100,7 @@ empty, which means OFF.**
 | 2 | No `X-WKND-Delegation` header. Delegated agents never grant. | 403 `delegated-not-allowed` | Auth0, store |
 | 3 | A valid Auth0 RS256 token (`lib/auth.js` `verifyToken`) | 401 `unauthenticated` | store |
 | 4 | `shopperKey(AUTH0_ISSUER, sub)` is allowlisted | 403 `not-allowlisted` | store |
-| 5 | A strict JSON body containing only that op's fields | 400 `invalid-request` | store |
+| 5 | A strict JSON body with a string op owned by the operation allowlist (no inherited names), containing only that op's fields | 400 `invalid-request` | store |
 | 6 | Grant: `TARGET_ID_LINKAGE_ENABLED=true` and the wording in `TARGET_ID_LINKAGE_WORDING_VERSIONS` | 403 `linkage-disabled` / `wording-not-approved` | store |
 | 7 | Decide: linkage enabled, `TARGET_ID_BINDING_STORE_APPROVED=true`, `TARGET_ID_SERVICE_ENABLED=true`, org, DPID, bounded `TARGET_ID_TIMEOUT_MS` / `TARGET_ID_LEASE_MS` / `TARGET_DIAG_TIMEOUT_MS`, Target client and property | 503 `not-approved` with the gate's **name** | store, ID Service, Target |
 
@@ -122,7 +122,7 @@ empty, which means OFF.**
 
 - **Separate and optional.**
   - It is not one of the email `CONSENT_PURPOSES`, and email opt-ins never imply it.
-  - It is stored atomically in one `updateOne` on the customer document:
+  - It is stored with generation-conditional `updateOne` operations on the customer document:
     `idLinkage: { state, grantId, source, wordingVersion, updatedAt }`.
   - `grantId` is a server-issued UUID per grant and serves as the **generation token**.
 - **Granting** needs all of the following:
@@ -131,11 +131,19 @@ empty, which means OFF.**
   - an approved wording version (none is approved by default);
   - an existing customer record, created by a website sign-in.
 
-  Granting again while granted keeps the same grant, so there is no ECID churn. A grant whose
-  `marketing_consent_events` evidence cannot be written is reverted (fail closed).
+  A grant first reserves a non-authorizing `pending` generation. Only after its
+  `marketing_consent_events` evidence succeeds can that same pending generation become `granted`.
+  Pending consent maps to `unknown`: no binding issuance, reuse, ID Service call or Target decision.
+  Concurrent grants while pending return `CONFLICT`. Evidence failure withdraws only that pending
+  generation; activation after withdrawal or reconsent returns `CONFLICT`, never resurrecting or
+  overwriting newer consent. No failed-generation binding can issue while evidence is pending.
+  Granting again while granted keeps the same grant, so there is no ECID churn.
 - **Withdrawal** is always allowed.
-  - It writes the state first, then removes every binding for `sha256(sub)`, then appends the evidence.
-  - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) withdraws an existing grant
+  - It conditionally withdraws the current pending or granted generation first, then removes bindings
+    matching both `sha256(sub)` and that generation, then appends evidence. Delayed cleanup cannot
+    delete a newer grant's binding. Evidence failure is explicit and sanitized; withdrawal stays effective.
+  - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) withdraws linkage before
+    fallible email preference/evidence writes. It withdraws an existing pending or granted generation
     the same way and **can never grant**. With no grant it is a read-only query; it writes nothing
     and never touches the binding collection.
   - Withdrawing an email purpose (`setMarketingConsent(false)`) does **not** withdraw linkage, because

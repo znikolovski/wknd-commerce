@@ -43,11 +43,12 @@ describe('ID-linkage consent purpose (separate, optional, explicit)', () => {
       .toEqual({ enabled: false, wordingVersions: ['ok-1'] });
   });
 
-  test('an explicit first-party grant writes state and a server-issued grantId in ONE update, plus evidence', async () => {
+  test('an explicit first-party grant reserves a generation, records evidence, then conditionally activates', async () => {
     const store = await seeded();
     const updates = jest.spyOn(store.collection('customers'), 'updateOne');
     expect(await grant(store)).toEqual({ state: 'granted', changed: true });
-    expect(updates).toHaveBeenCalledTimes(1);
+    expect(updates).toHaveBeenCalledTimes(2);
+    expect(updates.mock.calls[0][1].$set.idLinkage.state).toBe('pending');
     const { idLinkage } = await customer(store);
     expect(idLinkage).toEqual({
       state: 'granted', grantId: expect.stringMatching(/^[0-9a-f-]{36}$/), source: 'account-settings', wordingVersion: 'idl-2026-11', updatedAt: new Date(T0).toISOString(),
@@ -107,7 +108,8 @@ describe('ID-linkage consent purpose (separate, optional, explicit)', () => {
   test('withdrawal is always allowed (even with the feature off), removes bindings and is idempotent', async () => {
     const store = await seeded();
     await grant(store);
-    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), state: 'bound' } });
+    const { grantId } = (await customer(store)).idLinkage;
+    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId, state: 'bound' } });
     await store.collection(BINDING_COLLECTION).insertOne({ _id: 'other', etag: 'e2', record: { subject: sha256('auth0|other') } });
     expect(await setIdLinkageConsent(store, { sub: SUB }, false, { config: linkageConfig({}) }))
       .toEqual({ state: 'withdrawn', changed: true });
@@ -124,6 +126,61 @@ describe('ID-linkage consent purpose (separate, optional, explicit)', () => {
     await setIdLinkageConsent(store, { sub: SUB }, false);
     await grant(store);
     expect((await customer(store)).idLinkage.grantId).not.toBe(first);
+  });
+
+  test.each(['success', 'rejection'])('an old pending grant (%s) cannot resurrect or overwrite a withdrawn/regranted generation', async (outcome) => {
+    const store = await seeded();
+    const evidence = store.collection('marketing_consent_events');
+    const insert = evidence.insertOne.bind(evidence);
+    let entered;
+    let finish;
+    const started = new Promise((resolve) => { entered = resolve; });
+    jest.spyOn(evidence, 'insertOne').mockImplementationOnce((doc) => {
+      entered();
+      return new Promise((resolve, reject) => {
+        finish = () => {
+          if (outcome === 'rejection') reject(new Error('evidence unavailable'));
+          else resolve(insert(doc));
+        };
+      });
+    });
+    const oldGrant = code(grant(store));
+    await started;
+    expect(await lookup(store)).toEqual({ state: 'unknown' });
+    expect(await code(grant(store))).toBe('CONFLICT');
+    const pendingId = (await customer(store)).idLinkage.grantId;
+    expect(await setIdLinkageConsent(store, { sub: SUB }, false)).toMatchObject({ changed: true });
+    expect(await lookup(store)).toEqual({ state: 'withdrawn' });
+    await grant(store);
+    const newGrant = (await customer(store)).idLinkage;
+    expect(newGrant.grantId).not.toBe(pendingId);
+    await store.collection(BINDING_COLLECTION).insertOne({
+      _id: KEY, etag: 'new', record: { subject: sha256(SUB), consentGrantId: newGrant.grantId },
+    });
+    finish();
+    expect(await oldGrant).toBe(outcome === 'rejection' ? 'EVIDENCE_FAILED' : 'CONFLICT');
+    expect((await customer(store)).idLinkage).toEqual(newGrant);
+    expect(await lookup(store)).toEqual({ state: 'granted', grantId: newGrant.grantId });
+    expect(await store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
+  });
+
+  test('withdrawal during pending evidence is not resurrected when evidence succeeds', async () => {
+    const store = await seeded();
+    const evidence = store.collection('marketing_consent_events');
+    const insert = evidence.insertOne.bind(evidence);
+    let entered;
+    let finish;
+    const started = new Promise((resolve) => { entered = resolve; });
+    jest.spyOn(evidence, 'insertOne').mockImplementationOnce((doc) => {
+      entered();
+      return new Promise((resolve) => { finish = () => resolve(insert(doc)); });
+    });
+    const oldGrant = code(grant(store));
+    await started;
+    await setIdLinkageConsent(store, { sub: SUB }, false);
+    finish();
+    expect(await oldGrant).toBe('CONFLICT');
+    expect(await lookup(store)).toEqual({ state: 'withdrawn' });
   });
 });
 
@@ -161,7 +218,8 @@ describe('Brevo unsubscribe (withdraw-all) never grants and conservatively withd
   test('withdraws an existing grant (same email matching as the email purposes) and removes its bindings', async () => {
     const store = await seeded();
     await grant(store);
-    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB) } });
+    const { grantId } = (await customer(store)).idLinkage;
+    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'e1', record: { subject: sha256(SUB), consentGrantId: grantId } });
     expect((await webhook(store)).status).toBe(200);
     expect((await customer(store)).idLinkage).toMatchObject({ state: 'withdrawn', source: 'brevo-unsubscribe' });
     expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
@@ -182,6 +240,41 @@ describe('Brevo unsubscribe (withdraw-all) never grants and conservatively withd
     await webhook(store);
     expect(await withdrawIdLinkageForEmail(store, EMAIL)).toBe(0);
     expect(await lookup(store)).toEqual({ state: 'withdrawn' });
+  });
+
+  test.each(['all evidence', 'email evidence'])('%s failure still withdraws linkage and prevents binding reuse', async (failure) => {
+    const store = await seeded();
+    await grant(store);
+    const fetchImpl = jest.fn(async () => ({
+      ok: true, json: async () => ({ d_mid: ECID_A, dcs_region: 9, d_blob: 'blob', id_sync_ttl: '604800' }),
+    }));
+    const provider = createIdServiceBindingProvider({
+      orgId: '28260E2056581D3B7F000101@AdobeOrg',
+      dpid: '1547309',
+      consent: createIdLinkageConsentSource(store, { issuer: ISSUER }),
+      store: createBindingStore(store),
+      fetchImpl,
+      now: () => T0,
+    });
+    const binding = await provider.resolve({ shopperKey: KEY, sub: SUB });
+    expect(binding.ecid).toBe(ECID_A);
+    const evidence = store.collection('marketing_consent_events');
+    const insert = evidence.insertOne.bind(evidence);
+    jest.spyOn(evidence, 'insertOne').mockImplementation((doc) => {
+      if (failure === 'all evidence' || doc.purpose !== 'idLinkage') {
+        throw new Error(`evidence unavailable ${EMAIL}`);
+      }
+      return insert(doc);
+    });
+    await expect(webhook(store)).rejects.toMatchObject({
+      code: 'EVIDENCE_FAILED',
+      message: failure === 'all evidence' ? 'The setting could not be saved.' : 'Email preference evidence could not be saved.',
+    });
+    expect(await lookup(store)).toEqual({ state: 'withdrawn' });
+    expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
+    expect((await provider.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('consent-withdrawn');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -271,5 +364,31 @@ describe('provider end-to-end on the real adapters (memory store, fake ID Servic
     });
     expect((await build(store, fetchImpl).resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('cas-conflict');
     expect(await store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+  });
+
+  test('delayed withdrawal cleanup never deletes a newer grant binding', async () => {
+    const store = await seeded();
+    await grant(store);
+    const fetchImpl = jest.fn(async () => ({ ok: true, json: async () => idResponse(ECID_A) }));
+    const provider = build(store, fetchImpl);
+    await provider.resolve({ shopperKey: KEY, sub: SUB });
+    const bindings = store.collection(BINDING_COLLECTION);
+    const remove = bindings.deleteMany.bind(bindings);
+    let entered;
+    let finish;
+    const started = new Promise((resolve) => { entered = resolve; });
+    jest.spyOn(bindings, 'deleteMany').mockImplementationOnce((filter) => {
+      entered();
+      return new Promise((resolve) => { finish = () => resolve(remove(filter)); });
+    });
+    const withdrawing = setIdLinkageConsent(store, { sub: SUB }, false);
+    await started;
+    await grant(store);
+    const binding = await provider.resolve({ shopperKey: KEY, sub: SUB });
+    expect(binding.source).toBe('server-issued');
+    finish();
+    await withdrawing;
+    expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(true);
+    expect(await bindings.find({})).toHaveLength(1);
   });
 });

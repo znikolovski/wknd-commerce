@@ -144,6 +144,30 @@ describe('disabled / unapproved configuration never touches storage, Auth0, the 
     expectUntouched(h);
   });
 
+  test.each(['toString', 'constructor', '__proto__', 'valueOf', 'hasOwnProperty', ['decide'], null, 1])(
+    'invalid or inherited operation %p is refused before any effects, even with decide gates off',
+    async (op) => {
+      const h = harness({
+        config: {
+          ...LIVE,
+          TARGET_ID_LINKAGE_ENABLED: 'false',
+          TARGET_ID_BINDING_STORE_APPROVED: 'false',
+          TARGET_ID_SERVICE_ENABLED: 'false',
+        },
+      });
+      await seedCustomer(h.store);
+      await h.store.collection('customers').updateOne({ sub: SUB }, {
+        $set: { idLinkage: { state: 'granted', grantId: '00000000-0000-4000-8000-000000000001' } },
+      });
+      const token = await auth0Token();
+      expect((await h.call({ op: 'decide' }, { token })).statusCode).toBe(503);
+      expect(await h.call({ op }, { token })).toMatchObject({
+        statusCode: 400, body: { status: 'unavailable', reason: 'invalid-request' },
+      });
+      expectUntouched(h);
+    },
+  );
+
   test.each([
     ['linkage off', { TARGET_ID_LINKAGE_ENABLED: 'false' }, 'linkage-disabled'],
     ['no approved wording (legal gate)', { TARGET_ID_LINKAGE_WORDING_VERSIONS: '' }, 'wording-not-approved'],
@@ -253,6 +277,44 @@ describe('identity: only verified, first-party, allowlisted shoppers; config is 
 });
 
 describe('consent operations and the inert decide flow', () => {
+  test.each([
+    ['success', { statusCode: 200, body: { consent: 'granted', changed: true } }, { status: 'decided' }, 2, 1],
+    ['rejection', { statusCode: 503, body: { reason: 'evidence-failed' } }, { status: 'unavailable', bindingReason: 'consent-withdrawn' }, 0, 0],
+  ])('pending evidence (%s) cannot issue a binding or expose a marker', async (outcome, expectedGrant, expectedDecision, fetchCount, bindingCount) => {
+    const h = harness();
+    await seedCustomer(h.store);
+    const token = await auth0Token();
+    const evidence = h.store.collection('marketing_consent_events');
+    const insert = evidence.insertOne.bind(evidence);
+    let entered;
+    let finish;
+    const started = new Promise((resolve) => { entered = resolve; });
+    jest.spyOn(evidence, 'insertOne').mockImplementationOnce((doc) => {
+      entered();
+      return new Promise((resolve, reject) => {
+        finish = () => {
+          if (outcome === 'rejection') reject(new Error(`evidence unavailable ${SUB}`));
+          else resolve(insert(doc));
+        };
+      });
+    });
+    const granting = h.call({ op: 'consent', optIn: true, wordingVersion: 'idl-2026-11' }, { token });
+    await started;
+    expect((await h.call({ op: 'consent-status' }, { token })).body.consent).toBe('unknown');
+    const decision = await h.call({ op: 'decide' }, { token });
+    expect(decision.body).toMatchObject({ status: 'unavailable', bindingReason: 'consent-unknown' });
+    expect(decision.body.marker).toBeUndefined();
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toEqual([]);
+    finish();
+    const result = await granting;
+    expect(result).toMatchObject(expectedGrant);
+    expect((await h.call({ op: 'decide' }, { token })).body).toMatchObject(expectedDecision);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(fetchCount);
+    expect(await h.store.collection(BINDING_COLLECTION).find({})).toHaveLength(bindingCount);
+    expect(h.lines.join('\n')).not.toContain(SUB);
+  });
+
   test('grant → decide issues one binding and returns an inert marker with no identifiers', async () => {
     const h = harness();
     await seedCustomer(h.store);

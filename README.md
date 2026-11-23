@@ -194,6 +194,8 @@ with WKND Demo Pay inside ChatGPT. It calls `storefront-graphql` directly with
   refreshes their profile on the next sign-in.
 - Delegation is disabled unless both `WKND_MCP_DELEGATION_ISSUER` and `WKND_MCP_DELEGATION_SECRET`
   (≥ 32 bytes, equal to the LLM app's `WKND_COMMERCE_ASSERTION_SECRET`) are set.
+  During a key rotation, `WKND_MCP_DELEGATION_SECRET_PREVIOUS` is also accepted until cleared
+  (see `docs/PROMOTIONS.md`, rotation overlap).
 
 `placeOrder` claims the cart (`active` → `ordering`, matching the cart `revision` it validated) before
 reserving stock, and `saveCart` only writes carts still in their expected status. Concurrent or

@@ -146,6 +146,66 @@ describe('environment isolation of delegated assertions (synthetic keys only)', 
   });
 });
 
+describe('delegation secret rotation overlap (synthetic keys only)', () => {
+  const OLD = crypto.randomBytes(48).toString('base64url');
+  const NEW = crypto.randomBytes(48).toString('base64url');
+  const STAGE_KEY = crypto.randomBytes(48).toString('base64url');
+  const SINGLE = { ...PARAMS, MCP_DELEGATION_SECRET: NEW };
+  const OVERLAP = { ...SINGLE, MCP_DELEGATION_SECRET_PREVIOUS: OLD };
+  const query = async (secret, params, claims = {}) => gql(CART_QUERY, {
+    token: await assertion(claims, { secret }), delegated: true, params,
+  });
+  const refused = (body) => body.errors?.[0]?.extensions?.category === 'graphql-authentication'
+    && (body.data?.customerCart ?? null) === null;
+
+  test('an empty previous key keeps single-key behaviour', async () => {
+    for (const params of [SINGLE, { ...SINGLE, MCP_DELEGATION_SECRET_PREVIOUS: '' }]) {
+      // eslint-disable-next-line no-await-in-loop
+      expect((await query(NEW, params)).errors).toBeUndefined();
+      // eslint-disable-next-line no-await-in-loop
+      expect(refused(await query(OLD, params))).toBe(true);
+    }
+  });
+
+  test('during the overlap both the new and the previous key are accepted', async () => {
+    expect((await query(NEW, OVERLAP)).errors).toBeUndefined();
+    expect((await query(OLD, OVERLAP)).errors).toBeUndefined();
+  });
+
+  test('once the previous key is cleared, the old key is refused and the new key still works', async () => {
+    expect(refused(await query(OLD, SINGLE))).toBe(true);
+    expect((await query(NEW, SINGLE)).errors).toBeUndefined();
+  });
+
+  test('a Stage key and an unrelated key are refused in both slots, creating nothing', async () => {
+    for (const key of [STAGE_KEY, crypto.randomBytes(48).toString('base64url')]) {
+      // eslint-disable-next-line no-await-in-loop
+      expect(refused(await query(key, OVERLAP))).toBe(true);
+    }
+    expect(await store.collection('customers').countDocuments({})).toBe(0);
+    expect(await store.collection('delegation_jti').countDocuments({})).toBe(0);
+  });
+
+  test('a short previous key is never accepted', async () => {
+    const short = 'previous-key-too-short';
+    const body = await query(short, { ...SINGLE, MCP_DELEGATION_SECRET_PREVIOUS: short });
+    expect(refused(body)).toBe(true);
+  });
+
+  test('claim checks still apply to previous-key assertions', async () => {
+    expect(refused(await query(OLD, OVERLAP, { aud: 'urn:other' }))).toBe(true);
+    expect(refused(await query(OLD, OVERLAP, { identity_issuer: 'https://other.auth0.com/' }))).toBe(true);
+    expect(refused(await query(OLD, OVERLAP, { scope: 'profile' }))).toBe(true);
+  });
+
+  test('a jti is accepted once across both keys', async () => {
+    const jti = crypto.randomUUID();
+    expect((await query(OLD, OVERLAP, { jti })).errors).toBeUndefined();
+    expect(refused(await query(NEW, OVERLAP, { jti }))).toBe(true);
+    expect(refused(await query(OLD, OVERLAP, { jti }))).toBe(true);
+  });
+});
+
 describe('order placement claims the cart once', () => {
   async function readyCart() {
     const customer = { sub: SUB, email: 'shopper@example.com', addresses: [] };

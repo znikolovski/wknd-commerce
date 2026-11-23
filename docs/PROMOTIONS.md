@@ -202,12 +202,22 @@ default off, never inferred from sign-in or checkout). Safety defaults:
 - Email params: `FIRSTNAME`, `CART_URL` (campaign UTM only, shopper signs in), `PERCENT_OFF`,
   `MAX_DISCOUNT`. The Brevo template must state that the store and payment are a demo and include
   Brevo's unsubscribe link.
+- Set `WKND_SHOP_CART_URL` per workspace; the worker passes it as `SHOP_CART_URL`. There is no
+  Production fallback: a missing URL refuses execution before provider calls and leaves the run
+  approved. Production must use `https://wknd-adventures.run.place/shop/cart`. Stage must use a
+  storefront actually configured for Stage Commerce, not merely an EDS preview hostname.
+  For a local Stage-configured server on port 3000, a rendered example is
+  `http://localhost:3000/shop/cart?utm_source=brevo&utm_medium=email&utm_campaign=wknd-cart-recovery-2026`.
+  This fixture link is only usable on the demo machine while that server is running; it is not
+  evidence of a published Stage storefront. Confirm the real Stage URL before configuring or
+  deploying the worker. Do not reuse `WKND_SITE_ORIGIN`, which is also used for canonical product
+  links and currently names Production in the Stage checkout.
 
 Actions:
 
 | Action | Type | Params |
 | --- | --- | --- |
-| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED`, `BREVO_API_KEY`, `BREVO_RECOVERY_TEMPLATE_ID`, `RECOVERY_EMAIL_ALLOWLIST`, `RECOVERY_EMAIL_DAILY_BUDGET` |
+| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED`, `BREVO_API_KEY`, `BREVO_RECOVERY_TEMPLATE_ID`, `SHOP_CART_URL`, `RECOVERY_EMAIL_ALLOWLIST`, `RECOVERY_EMAIL_DAILY_BUDGET` |
 | `brevo-webhook` | raw web action, no IMS (optional) | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
 
 Suppression does not depend on the webhook: before every run `executeRun` pulls Brevo's

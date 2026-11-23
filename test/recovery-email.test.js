@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const yaml = require('js-yaml');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const { runGraphQL } = require('../lib/graphql-server');
@@ -25,6 +26,7 @@ const PARAMS = {
   RECOVERY_REDEMPTION_VERIFIED: 'true',
   RECOVERY_EMAIL_ALLOWLIST: 'ava@example.com,ben@example.com',
   BREVO_RECOVERY_TEMPLATE_ID: '12',
+  SHOP_CART_URL: 'https://wknd-adventures.run.place/shop/cart',
   BREVO_WEBHOOK_TOKEN: 'hook-secret-token',
 };
 const sku = CATALOG.products.find((p) => p.type === 'simple').sku;
@@ -150,6 +152,37 @@ describe('execution', () => {
     expect(sent[0].params.CART_URL).not.toMatch(/cart-auth0|auth0|%7C|@/);
     await expect(svc.executeRun({ runId: (await approvedRun(svc)) })).resolves.toMatchObject({ sent: 0 });
     expect(sent).toHaveLength(2);
+  });
+
+  test.each([
+    ['Stage local storefront', 'http://localhost:3000/shop/cart'],
+    ['Production', 'https://wknd-adventures.run.place/shop/cart'],
+  ])('worker uses the configured %s cart link with campaign attribution only', async (_environment, cartUrl) => {
+    await enableOffer();
+    const manifest = yaml.load(fs.readFileSync(path.join(__dirname, '../app.config.yaml'), 'utf8'));
+    const binding = manifest.application.runtimeManifest.packages.commerce.actions['promotions-worker'].inputs.SHOP_CART_URL;
+    const env = { WKND_SHOP_CART_URL: cartUrl };
+    const svc = createRecoveryEmail({
+      store, params: { ...PARAMS, SHOP_CART_URL: binding && env[binding.slice(1)] }, clock, brevo,
+    });
+    await svc.resume();
+    await svc.executeRun({ runId: await approvedRun(svc, 1) });
+    expect(sent).toHaveLength(1);
+    expect(sent[0].params.CART_URL).toBe(`${cartUrl}?utm_source=brevo&utm_medium=email&utm_campaign=${encodeURIComponent(DEFAULT_CAMPAIGN.campaignId)}`);
+  });
+
+  test('missing cart URL fails before provider calls or claiming an approved run', async () => {
+    await enableOffer();
+    const listBlockedContacts = jest.fn();
+    const svc = createRecoveryEmail({
+      store, params: { ...PARAMS, SHOP_CART_URL: '' }, clock, brevo: { ...brevo, listBlockedContacts },
+    });
+    await svc.resume();
+    const runId = await approvedRun(svc, 1);
+    await expect(svc.executeRun({ runId })).rejects.toMatchObject({ code: 'NOT_CONFIGURED' });
+    expect(listBlockedContacts).not.toHaveBeenCalled();
+    expect(sent).toHaveLength(0);
+    expect(await store.collection('recovery_email_runs').findOne({ runId })).toMatchObject({ state: 'approved' });
   });
 
   test('respects the approved run size', async () => {

@@ -138,13 +138,25 @@ empty, which means OFF.**
   generation; activation after withdrawal or reconsent returns `CONFLICT`, never resurrecting or
   overwriting newer consent. No failed-generation binding can issue while evidence is pending.
   Granting again while granted keeps the same grant, so there is no ECID churn.
+  Interrupted grants recover without touching newer generations:
+  - Evidence recorded but the activation write failed: the request fails with `ACTIVATION_PENDING`
+    (503 `activation-pending`, never success) and stays `pending`. The next grant finds that
+    generation's evidence and, if its wording is still approved, activates exactly that `grantId`.
+  - A reservation with no evidence (for example the evidence-failure revert also failed) is
+    superseded by a new grant only after `PENDING_LEASE_MS` (60s, bounded, not an SLA) has passed
+    since it was reserved. Within the lease it may still be in flight, so the result is `CONFLICT`.
+  - Every recovery write is conditional on the pending generation's `grantId`, so it can never
+    overwrite a later withdrawal or regrant.
 - **Withdrawal** is always allowed.
   - It conditionally withdraws the current pending or granted generation first, then removes bindings
     matching both `sha256(sub)` and that generation, then appends evidence. Delayed cleanup cannot
     delete a newer grant's binding. Evidence failure is explicit and sanitized; withdrawal stays effective.
-  - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) withdraws linkage before
-    fallible email preference/evidence writes. It withdraws an existing pending or granted generation
-    the same way and **can never grant**. With no grant it is a read-only query; it writes nothing
+  - A Brevo unsubscribe (`recordSuppression`, which withdraws every purpose) attempts every
+    authoritative state change (linkage for each matching customer, then both email purposes)
+    regardless of the others' failures, and only then reports errors: state failures first, then
+    linkage `EVIDENCE_FAILED`, then email `EVIDENCE_FAILED`. Email evidence is written only when the
+    email state change succeeded. It withdraws an existing pending or granted generation the same
+    way and **can never grant**. With no grant it is a read-only query; it writes nothing
     and never touches the binding collection.
   - Withdrawing an email purpose (`setMarketingConsent(false)`) does **not** withdraw linkage, because
     the purposes are separate.

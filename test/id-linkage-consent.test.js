@@ -6,7 +6,7 @@ const { createMemoryStore } = require('../lib/store');
 const { sha256 } = require('../lib/promotion-schema');
 const { shopperKey } = require('../lib/recovery-policy');
 const {
-  IdLinkageError, linkageConfig, setIdLinkageConsent, withdrawIdLinkageForEmail, createIdLinkageConsentSource,
+  IdLinkageError, PENDING_LEASE_MS, linkageConfig, setIdLinkageConsent, withdrawIdLinkageForEmail, createIdLinkageConsentSource,
 } = require('../lib/id-linkage-consent');
 const { BINDING_COLLECTION, createBindingStore, removeBindingsForSubject } = require('../lib/target-binding-store');
 const { createIdServiceBindingProvider } = require('../lib/target-id-binding');
@@ -184,6 +184,97 @@ describe('ID-linkage consent purpose (separate, optional, explicit)', () => {
   });
 });
 
+describe('interrupted grants recover without touching newer generations', () => {
+  const failActivationOnce = (store) => {
+    const customers = store.collection('customers');
+    const update = customers.updateOne.bind(customers);
+    return jest.spyOn(customers, 'updateOne').mockImplementation((filter, change) => {
+      if (change.$set?.['idLinkage.state'] === 'granted' && !failActivationOnce.done) {
+        failActivationOnce.done = true;
+        return Promise.reject(new Error('db unavailable'));
+      }
+      return update(filter, change);
+    });
+  };
+  beforeEach(() => { failActivationOnce.done = false; });
+
+  test('activation failure after evidence is explicit, authorizes nothing, and a retry activates that generation', async () => {
+    const store = await seeded();
+    failActivationOnce(store);
+    expect(await code(grant(store))).toBe('ACTIVATION_PENDING');
+    const pending = (await customer(store)).idLinkage;
+    expect(pending.state).toBe('pending');
+    expect(await lookup(store)).toEqual({ state: 'unknown' });
+    expect(await grant(store)).toEqual({ state: 'granted', changed: true });
+    expect((await customer(store)).idLinkage).toEqual({ ...pending, state: 'granted' });
+    expect(await lookup(store)).toEqual({ state: 'granted', grantId: pending.grantId });
+    expect(await events(store)).toHaveLength(1);
+  });
+
+  test('an interrupted generation never overwrites a later withdrawal or regrant', async () => {
+    const store = await seeded();
+    failActivationOnce(store);
+    expect(await code(grant(store))).toBe('ACTIVATION_PENDING');
+    const stale = (await customer(store)).idLinkage.grantId;
+    expect(await setIdLinkageConsent(store, { sub: SUB }, false)).toEqual({ state: 'withdrawn', changed: true });
+    await grant(store);
+    const newer = (await customer(store)).idLinkage;
+    expect(newer.grantId).not.toBe(stale);
+    await store.collection(BINDING_COLLECTION).insertOne({ _id: KEY, etag: 'new', record: { subject: sha256(SUB), consentGrantId: newer.grantId } });
+    await removeBindingsForSubject(store, sha256(SUB), { grantId: stale });
+    expect(await grant(store)).toEqual({ state: 'granted', changed: false });
+    expect((await customer(store)).idLinkage).toEqual(newer);
+    expect(await store.collection(BINDING_COLLECTION).find({})).toHaveLength(1);
+  });
+
+  test('an evidence-less reservation (failed revert) is superseded only after its lease lapses', async () => {
+    const store = await seeded();
+    const customers = store.collection('customers');
+    const update = customers.updateOne.bind(customers);
+    jest.spyOn(store.collection('marketing_consent_events'), 'insertOne').mockRejectedValueOnce(new Error('db'));
+    jest.spyOn(customers, 'updateOne').mockImplementation((filter, change) => (
+      change.$set?.idLinkage?.source === 'evidence-failure' ? Promise.reject(new Error('db')) : update(filter, change)));
+    expect(await code(grant(store))).toBe('EVIDENCE_FAILED');
+    const abandoned = (await customer(store)).idLinkage;
+    expect(abandoned.state).toBe('pending');
+    expect(await lookup(store)).toEqual({ state: 'unknown' });
+    expect(await code(grant(store, { clock: () => T0 + PENDING_LEASE_MS - 1 }))).toBe('CONFLICT');
+    expect((await customer(store)).idLinkage).toEqual(abandoned);
+    expect(await grant(store, { clock: () => T0 + PENDING_LEASE_MS })).toEqual({ state: 'granted', changed: true });
+    const { grantId } = (await customer(store)).idLinkage;
+    expect(grantId).not.toBe(abandoned.grantId);
+    expect(await lookup(store)).toEqual({ state: 'granted', grantId });
+  });
+
+  test('evidence under wording that is no longer approved is not activated by a retry', async () => {
+    const store = await seeded();
+    failActivationOnce(store);
+    expect(await code(grant(store))).toBe('ACTIVATION_PENDING');
+    const old = (await customer(store)).idLinkage.grantId;
+    const v2 = linkageConfig({ TARGET_ID_LINKAGE_ENABLED: 'true', TARGET_ID_LINKAGE_WORDING_VERSIONS: 'idl-2027-01' });
+    const regrant = (t) => grant(store, { wordingVersion: 'idl-2027-01', config: v2, clock: () => t });
+    expect(await code(regrant(T0 + 1))).toBe('CONFLICT');
+    expect(await regrant(T0 + PENDING_LEASE_MS)).toEqual({ state: 'granted', changed: true });
+    expect((await customer(store)).idLinkage).toMatchObject({ state: 'granted', wordingVersion: 'idl-2027-01' });
+    expect((await customer(store)).idLinkage.grantId).not.toBe(old);
+  });
+
+  test('a request whose generation a concurrent retry already activated reports granted, not a conflict', async () => {
+    const store = await seeded();
+    const customers = store.collection('customers');
+    const update = customers.updateOne.bind(customers);
+    jest.spyOn(customers, 'updateOne').mockImplementation(async (filter, change) => {
+      if (change.$set?.['idLinkage.state'] === 'granted' && !failActivationOnce.done) {
+        failActivationOnce.done = true;
+        await update(filter, change);
+        return { matchedCount: 0 };
+      }
+      return update(filter, change);
+    });
+    expect(await grant(store)).toEqual({ state: 'granted', changed: true });
+  });
+});
+
 describe('authoritative consent source', () => {
   test.each([
     ['a malformed grantId', { state: 'granted', grantId: 'x' }, { state: 'unknown' }],
@@ -275,6 +366,68 @@ describe('Brevo unsubscribe (withdraw-all) never grants and conservatively withd
     expect(await provider.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(false);
     expect((await provider.resolve({ shopperKey: KEY, sub: SUB })).reason).toBe('consent-withdrawn');
     expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('Brevo withdraw-all completes every authoritative state change before reporting failures', () => {
+  const optedIn = { recoveryEmail: { optIn: true }, audienceEmail: { optIn: true } };
+  const unsubscribe = (store) => handleBrevoWebhook(store, {
+    headers: { authorization: 'Bearer hook-token' },
+    body: { event: 'unsubscribed', email: EMAIL },
+    params: { BREVO_WEBHOOK_TOKEN: 'hook-token' },
+  }, { clock: () => T0 });
+  const allWithdrawn = async (store) => {
+    const c = await customer(store);
+    expect(c.idLinkage).toMatchObject({ state: 'withdrawn', grantId: null, source: 'brevo-unsubscribe' });
+    expect(c.marketing.recoveryEmail).toMatchObject({ optIn: false, source: 'brevo-unsubscribe' });
+    expect(c.marketing.audienceEmail).toMatchObject({ optIn: false, source: 'brevo-unsubscribe' });
+    expect(await lookup(store)).toEqual({ state: 'withdrawn' });
+  };
+
+  test.each([
+    ['linkage evidence', (doc) => doc.purpose === 'idLinkage', 'The setting could not be saved.'],
+    ['email evidence', (doc) => doc.purpose !== 'idLinkage', 'Email preference evidence could not be saved.'],
+    ['all evidence', () => true, 'The setting could not be saved.'],
+  ])('%s failure: linkage and both email opt-ins are withdrawn, then EVIDENCE_FAILED', async (_, fails, message) => {
+    const store = await seeded({ marketing: optedIn });
+    await grant(store);
+    const evidence = store.collection('marketing_consent_events');
+    const insert = evidence.insertOne.bind(evidence);
+    jest.spyOn(evidence, 'insertOne').mockImplementation((doc) => (fails(doc) ? Promise.reject(new Error('db')) : insert(doc)));
+    await expect(unsubscribe(store)).rejects.toMatchObject({ code: 'EVIDENCE_FAILED', message });
+    await allWithdrawn(store);
+  });
+
+  test('a linkage state failure still withdraws the email purposes, then is reported', async () => {
+    const store = await seeded({ marketing: optedIn });
+    await grant(store);
+    const customers = store.collection('customers');
+    const update = customers.updateOne.bind(customers);
+    jest.spyOn(customers, 'updateOne').mockImplementation((filter, change) => (
+      change.$set?.idLinkage ? Promise.reject(new Error('db')) : update(filter, change)));
+    await expect(unsubscribe(store)).rejects.toThrow('db');
+    const c = await customer(store);
+    expect(c.marketing.recoveryEmail.optIn).toBe(false);
+    expect(c.marketing.audienceEmail.optIn).toBe(false);
+  });
+
+  test('an email state failure still withdraws linkage, then is reported', async () => {
+    const store = await seeded({ marketing: optedIn });
+    await grant(store);
+    const customers = store.collection('customers');
+    const update = customers.updateOne.bind(customers);
+    jest.spyOn(customers, 'updateOne').mockImplementation((filter, change) => (
+      change.$set?.['marketing.recoveryEmail'] ? Promise.reject(new Error('email db')) : update(filter, change)));
+    await expect(unsubscribe(store)).rejects.toThrow('email db');
+    expect(await lookup(store)).toEqual({ state: 'withdrawn' });
+  });
+
+  test('with no linkage grant, email withdrawal still happens and no linkage evidence is written', async () => {
+    const store = await seeded({ marketing: optedIn });
+    expect((await unsubscribe(store)).status).toBe(200);
+    expect((await customer(store)).marketing.audienceEmail.optIn).toBe(false);
+    expect((await customer(store)).idLinkage).toBeUndefined();
+    expect(await events(store)).toEqual([]);
   });
 });
 

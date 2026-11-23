@@ -26,7 +26,8 @@ The additive draft service in `lib/promotion-drafts.js` stores metadata in
 evaluation engine, promotion effects, email or recovery runtime. Frozen `wknd.promotions/v1`
 remains null-only for audience restrictions. Draft IDs use `pdr_`, not live `prm_` IDs.
 There is no enable/apply operation or automatic promotion of a draft into the live engine.
-All results report `financialAuthorization: false` and
+All results report `financialAuthorization: false`,
+`availability: { status: "unavailable", reason: "FINANCIAL_AUTHORITY_NOT_PRESENT" }`, and
 `activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
 
 Exact draft DTO:
@@ -62,8 +63,9 @@ Exact draft DTO:
 ```
 
 The example ID/timestamps illustrate the shape, not a live saved record. The restriction is
-a required, non-null reference to configured Stage `climbing-interest` or `climbing-planner`,
-version 1; raw AAM IDs, other environments/versions, caller evidence and unknown fields are
+a required, non-null reference to configured `climbing-interest` or `climbing-planner`,
+version 1 in the server's Stage or Production environment; raw AAM IDs, mismatched/unknown environments,
+other versions, caller evidence and unknown fields are
 rejected. Draft validation reuses v1 term normalization; no behavior rules or membership evaluator
 are copied. `enabled: true` returns `RESTRICTED_ACTIVATION_BLOCKED` before storage.
 
@@ -76,7 +78,7 @@ are copied. `enabled: true` returns `RESTRICTED_ACTIVATION_BLOCKED` before stora
 | `promotions.drafts.update` | `update_audience_promotion_draft` | `{ id, expectedRevision, promotion }` |
 | `promotions.drafts.delete` | `delete_audience_promotion_draft` | `{ id, expectedRevision }` |
 
-Existing IMS/integration authentication is unchanged. Drafts are organisation-scoped; actor
+Existing IMS/integration authentication is unchanged. Drafts are organisation- and environment-scoped; actor
 audit metadata stays private. Draft CRUD is separate from the MCP financial-promotion write gate,
 which remains off. Create permits v1 optional term defaults plus the required restriction;
 update requires every mutable definition field. List is ID-ordered, capped at 50, and returns
@@ -90,8 +92,9 @@ For update/delete conflicts or uncertain outcomes, read the draft before decidin
 `REVISION_CONFLICT`, `DRAFT_NOT_FOUND`, `DRAFT_DELETED` and `INVALID_DRAFT` are explicit errors.
 Database failures propagate to the existing transport's logged error path, never a simulated success.
 
-The existing **Audience promotion drafts** picker validates/saves/opens/updates/deletes through
-this same service. It edits name, canonical audience, discount and cap while preserving other
+The existing **Audience promotion drafts** picker loads its environment and applicable audiences from
+the authenticated server catalogue and fails closed while unavailable. It validates/saves/opens/updates/deletes
+through this same service. It edits name, canonical audience, discount and cap while preserving other
 terms from opened drafts. The legacy live Promotions editor and engine are unchanged.
 
 Run `npm run preview:promotion-authoring` and open `http://127.0.0.1:4178` for a
@@ -103,7 +106,37 @@ persistence. The disabled-draft admin/MCP code was published to Stage after
 authentication are verified separately from authenticated discovery and persistent-store CRUD.
 Code publication does not change financial gates, verify membership or activate an offer.
 
-### Stage publication and runtime integration boundary
+### Production reference-only authoring and publication boundary
+
+Only trusted Runtime `__OW_NAMESPACE` selects the authoring environment:
+`28538-wkndcommerce-stage` is Stage and `28538-wkndcommerce` is Production.
+Unknown nonempty namespaces expose no catalogue and reject draft operations. A missing namespace
+is retained solely for existing local Stage fixtures. Caller arguments never select the server environment.
+Production IDs include the environment; existing Stage IDs remain compatible. Get/list/update/delete
+and create replay cannot cross the environment boundary, even with a shared in-memory test store.
+
+Production `list_promotion_authoring_audiences`/`promotions.authoringAudiences` returns
+`schema: "wknd.promotion-authoring/v1"`, `mode: "authoring"`, `environment: "production"` and exactly
+these existing canonical configuration references:
+
+| Key | AAM segment | Target shared audience | Target activity / mbox |
+| --- | --- | --- | --- |
+| `climbing-interest` | `27507403` | `11256851` | `689041` / `wknd-aam-production-eligibility-v1` |
+| `climbing-planner` | `27507404` | `11256852` | `689041` / `wknd-aam-production-eligibility-v1` |
+
+Both retain DPID `1547309`, merge rule `1547344`, `status: "configured-reference"` and
+`transport: "metadata-only"`. These are not binding attestations, current membership, financial
+authorization, or a new audience definition. Production read-only preview requires
+`environment: "production"` and reports the same explicit unavailable/blocked financial state as
+disabled-draft validation. Stage retains its original fixture envelope and two draft references.
+Neither contract permits enable/apply, restricted live-v1 promotions, or bypassing the provider trust gates.
+
+The Production bundler previously optimized the JSON array registry to `module.exports = []`.
+The narrow `asset/source` rule and shared JSON decoder preserve the full registry; Node fixture tests
+continue using native JSON. Verify the actual compiled catalogue, not only source-module tests.
+The picker source also consumes the server catalogue; its UI release is separate from these two backend execs.
+
+### Authoring exec publication and Stage runtime integration boundary
 
 The logical `commerce-admin/promotions` action is an authenticated sequence: the shared
 `app-registry` validator runs before `commerce-admin/__secured_promotions`. Selective authoring
@@ -176,7 +209,7 @@ Output is `schema: "wknd.promotion-authoring/fixture-v1"`, `mode: "fixture"`,
 It is **not** a live non-null restriction DTO and must not be submitted to `create_promotion`.
 Validation reuses the frozen definition validator for syntax, bounds, normalization and date order;
 it does not verify current catalogue references, coupon uniqueness, membership or financial eligibility.
-Unknown fields, raw audience IDs, other environments and `enabled: true` are explicitly rejected.
+Unknown fields, raw audience IDs, mismatched/unknown environments and `enabled: true` are explicitly rejected.
 Invalid preview arguments return `ok: false`, `error.code: "INVALID_DRAFT"` and field errors.
 
 **Handoff:** C01 above supplies the versioned, persisted **disabled draft** contract, shared by

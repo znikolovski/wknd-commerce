@@ -99,3 +99,22 @@ test('admin and MCP use the same service, validation and storage; invalid contex
   const db = createPromotionDraftService({ store: { collection() { throw new Error('Database unavailable'); } } });
   await expect(db.create(ctx, args)).rejects.toThrow('Database unavailable');
 });
+
+test('Production drafts preserve unavailable financial state and isolate Stage records and replay identities', async () => {
+  const production = { ...ctx, authoringEnvironment: 'production' };
+  const idempotencyKey = randomUUID();
+  const stage = await service.create(ctx, { idempotencyKey, promotion: promotion() });
+  const terms = promotion({ audienceRestriction: { environment: 'production', key: 'climbing-planner', version: 1 } });
+  const validation = await service.validate(production, { promotion: terms });
+  expect(validation).toMatchObject({
+    ok: true, persisted: false, financialAuthorization: false,
+    activation: { blocked: true }, availability: { status: 'unavailable' },
+  });
+  const created = await service.create(production, { idempotencyKey, promotion: terms });
+  expect(created.draft.id).not.toBe(stage.draft.id);
+  expect((await service.list(production)).items).toEqual([created.draft]);
+  expect((await service.get(production, { id: stage.draft.id })).error.code).toBe('DRAFT_NOT_FOUND');
+  expect((await service.validate(production, { promotion: promotion() })).error.code).toBe('INVALID_DRAFT');
+  expect((await service.update(production, { id: created.draft.id, expectedRevision: 1,
+    promotion: { ...terms, enabled: true } })).error.code).toBe('RESTRICTED_ACTIVATION_BLOCKED');
+});

@@ -160,7 +160,7 @@ test('official SDK client can initialize/list/read/write through raw Runtime ada
     expect(listed.length).toBe(24);
     expect(listed.find((tool) => tool.name === 'preview_audience_promotion_draft')).toMatchObject({
       annotations: { readOnlyHint: true, destructiveHint: false },
-      inputSchema: { properties: { environment: { const: 'stage' } } },
+      inputSchema: { properties: { environment: { enum: ['stage', 'production'] } } },
     });
     const read = await client.callTool({ name: 'get_product', arguments: { sku: 'GEAR-ONE' } });
     expect(JSON.parse(read.content[0].text).prices[0].regular).toBe(100);

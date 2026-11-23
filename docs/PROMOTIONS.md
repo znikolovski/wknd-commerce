@@ -13,7 +13,7 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 | `lib/promotions.js` | `createPromotionService` (list/get/create/update/disable, receipts, cursors, recovery worker), legacy migration, storefront runtime |
 | `lib/promotion-evaluation.js` | Pure cart evaluation: sale prices first, eligible explicit coupon wins, otherwise best automatic; largest-remainder allocation; GST |
 | `lib/promotion-effects.js` | Durable effect intent + global promotion invalidation (never product sale prices or PDP prerenders) |
-| `lib/recovery-policy.js` | Protected recovery policy (10%, AUD 25 cap), 24h–7d cohort, entitlements, single-redemption reservation |
+| `lib/recovery-policy.js` | Protected recovery policy (10%, AUD 25 cap), 55m–7d cohort, entitlements, single-redemption reservation |
 | `lib/shopper-audiences.js` | Fail-closed audience evidence resolver (no verified AAM provider) |
 | `scripts/migrate-promotions.mjs` | Explicit idempotent migration, recovery bootstrap, storage capability check |
 
@@ -391,7 +391,7 @@ default off, never inferred from sign-in or checkout). Safety defaults:
   `@adobe.com,jaggah@gmail.com,znikolovski24@gmail.com` in both environments.
 - Runs: `requestRun(ctx, { maxRecipients ≤ 50 })` → `approveRun` by a **different** IMS subject,
   bound to the same template id and size, valid 24h → `executeRun({ runId })`.
-- Every recipient is rechecked (consent, suppression, allowlist, 24h–7d window, no purchase since,
+- Every recipient is rechecked (consent, suppression, allowlist, 55m–7d window, no purchase since,
   offer enabled/verified, daily budget `RECOVERY_EMAIL_DAILY_BUDGET`, default 50).
 - Ledger `recovery_email_ledger` is unique per campaign/customer/episode. Ambiguous provider
   outcomes become `unknown` and are never resent; HTTP 429 releases the claim for a later run.
@@ -429,8 +429,12 @@ Sending is done by `promotions-worker` via `executeNextApprovedRun`:
   one bounded automatic run per five-minute window. Normal manual runs still require independent
   human approval; automatic runs are visibly marked `automatic`, not fabricated human approvals.
   Consent, pause, verified offer, suppression sync, recipient mode, daily budget and episode deduplication
-  remain enforced. The email inactivity threshold is **24 hours through 7 days**, not the separate
-  one-hour CartAbandoners audience. Financial recovery remains **10%, capped at AUD25**.
+  remain enforced. Email and financial recovery share a **55-minute through 7-day** inactivity
+  window. The five-minute alarm normally triggers the reminder 55–60 minutes after last
+  meaningful cart activity, with the same recovery offer already available when the shopper
+  opens the cart. Runtime/provider delays and safeguards are not an inbox-delivery SLA.
+  The separate AAM CartAbandoners audience does not decide financial eligibility.
+  Financial recovery remains **10%, capped at AUD25**.
 - Without `BREVO_API_KEY` it does nothing (`not-configured`).
 - While paused it returns `skipped/PAUSED` and the run stays approved until it expires.
 - The default recipient mode is allowlist-only. An empty allowlist still sends nothing unless
@@ -448,12 +452,19 @@ The approved Production namespace `28538-wkndcommerce` has non-secret email defa
 Stage; existing Runtime inputs override them. The API key remains an existing encrypted input.
 Production no longer restricts reminders to the retained pilot allowlist entries: ordinary
 signed-in cart owners are automatically eligible after explicit recovery-email opt-in, subject to
-the unchanged 24h–7d inactivity window, verified offer/ownership, suppression/unsubscribe checks,
+the shared 55m–7d email/financial inactivity window, verified offer/ownership, suppression/unsubscribe checks,
 no intervening purchase, one email per episode, pause switch, 50/day budget and 50/run maximum.
 No manual campaign enrollment or individual run approval is needed for automatic runs.
 An explicit Runtime input `RECOVERY_EMAIL_ALLOWLIST_DISABLED=false` can restore pilot mode.
 An active `promotions-worker-rule` must connect the `promotions-worker-tick` alarm
 (`*/5 * * * *`, `/whisk.system/alarms/alarm`) to this namespace's `commerce/promotions-worker`.
+
+Cart reads, session restoration and viewing the offer do not reset `activityAt`; item changes
+do. A claimed entitlement is valid only for the current qualifying episode and becomes
+ineligible after new activity or a subsequent purchase. The send loop also rechecks the same
+episode timestamp immediately before sending, so a new episode cannot consume an old ledger.
+The campaign identity, one-redemption-per-account rule and one-email-per-episode ledger
+are retained; shortening the window does not reset earlier redemptions or resend old emails.
 
 The atomic order insert now includes `emailConfirmation.state=pending`. This is the outbox:
 failed inserts create no email; subsequent cart/effect failures cannot lose an inserted order's

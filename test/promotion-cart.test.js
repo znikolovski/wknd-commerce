@@ -272,13 +272,34 @@ describe('protected cart recovery', () => {
     expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
   });
 
-  test('inactivity window is 24h to 7 days', async () => {
+  test('offer and claim qualify at 55 minutes and survive ordinary cart reads, not beyond 7 days', async () => {
     const id = await customerCartId();
     await gql(ADD, { id, sku: pricey.sku, qty: 1 });
-    await age(id, 23);
+    await age(id, (55 * 60 - 1) / 3600);
     expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({ status: 'INELIGIBLE', reason: 'NOT_IN_RECOVERY_WINDOW' });
+    await age(id, 55 / 60);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({ status: 'ELIGIBLE', percent_off: 10, max_discount: { value: 25 } });
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    expect((await gql(APPLY, { id, code: 'RECOVER10' })).errors).toBeUndefined();
+    expect(await customerCartId()).toBe(id);
+    expect((await gql(`query($id:String!){cart(cart_id:$id){${CART_FIELDS}}}`, { id })).errors).toBeUndefined();
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('CLAIMED');
     await age(id, 24 * 8);
     expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({ status: 'INELIGIBLE', reason: 'NOT_IN_RECOVERY_WINDOW' });
+  });
+
+  test('a claimed offer is invalidated by meaningful cart activity and a later owner purchase', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await age(id, 55 / 60);
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({ status: 'INELIGIBLE', reason: 'NOT_IN_RECOVERY_WINDOW' });
+    await age(id, 55 / 60);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('ELIGIBLE');
+    expect((await gql(CLAIM, { id })).data.claimWkndRecoveryOffer.status).toBe('CLAIMED');
+    await store.collection('orders').insertOne({ customerSub: SUB, createdAt: new Date().toISOString() });
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({ status: 'INELIGIBLE', reason: 'PURCHASED_SINCE' });
   });
 
   test('unverified redemption storage keeps the offer unavailable', async () => {

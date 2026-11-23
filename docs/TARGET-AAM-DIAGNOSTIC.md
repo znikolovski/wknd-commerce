@@ -27,10 +27,10 @@ verified issuer/shopper and environment. It never substitutes an ECID or exposes
 the Auth0 subject. Source approval additionally requires
 `WKND_TARGET_PERSON_ALIAS_APPROVED=true`; it defaults OFF.
 
-Responses use `apiVersion:"wknd.person-binding/v1"`, `status`, `consent`,
+Responses use `apiVersion:"wknd.person-binding/v1"`, `purpose:"idLinkage"`, `status`, `consent`,
 `binding` and `semanticAllowlist:[]`, plus the existing environment/evidence/
 financialAuthorization envelope. A granted binding contains `source:"server-issued"`,
-`personAlias`, `environment`, `runtimeNamespace`, `orgId`, `dpid`,
+`purpose:"idLinkage"`, `personAlias`, `environment`, `runtimeNamespace`, `orgId`, `dpid`,
 `namespace:"wkndCustomerId"`, `issuer` (this action's HTTPS URL),
 `consentGeneration`, `issuedAt`, `expiresAt` and `freshnessMs:300000`.
 Expiry is exclusive, five minutes after issuance, and is NOT membership expiry.

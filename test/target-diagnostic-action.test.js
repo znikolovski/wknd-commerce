@@ -122,7 +122,7 @@ test('public person contract never issues an alias or consent by default', async
   expect(result).toMatchObject({
     statusCode: 503,
     headers: { 'Cache-Control': 'no-store' },
-    body: { apiVersion: 'wknd.person-binding/v1', binding: null, reason: 'alias-not-approved', semanticAllowlist: [] },
+    body: { apiVersion: 'wknd.person-binding/v1', purpose: 'idLinkage', binding: null, reason: 'alias-not-approved', semanticAllowlist: [] },
   });
   expect(h.fetchImpl).not.toHaveBeenCalled();
   expect(await h.store.collection('person_aliases_v1').find({})).toEqual([]);
@@ -132,6 +132,8 @@ test('public person contract rejects caller identity and unapproved semantic eve
   const h = harness();
   const token = await auth0Token();
   expect(await h.call({ op: 'person-binding', personAlias: SUB }, { token }))
+    .toMatchObject({ statusCode: 400, body: { reason: 'invalid-request' } });
+  expect(await h.call({ op: 'person-binding', purpose: 'recovery' }, { token }))
     .toMatchObject({ statusCode: 400, body: { reason: 'invalid-request' } });
   expect(await h.call({ op: 'person-event', name: 'sherpa-search', args: {}, idempotencyKey: 'navigation' }, { token }))
     .toMatchObject({ statusCode: 503, body: { reason: 'canonical-rule-unavailable', semanticAllowlist: [] } });

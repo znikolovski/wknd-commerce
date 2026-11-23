@@ -98,8 +98,38 @@ Run `npm run preview:promotion-authoring` and open `http://127.0.0.1:4178` for a
 **local memory demonstration** of the same service. Saved metadata survives requests, but clears
 on process restart; every response is labelled `localSimulation: true`,
 `storage: "memory-cleared-on-restart"`. This is not a live API or proof of deployed database
-persistence. Admin/MCP persistent-store integration is source-only until separately approved deployment.
-No deploy, financial gate changes or live business writes are part of C01.
+persistence. The disabled-draft admin/MCP code was published to Stage after
+[#17](https://github.com/znikolovski/wknd-commerce/pull/17). Installed code and fail-closed
+authentication are verified separately from authenticated discovery and persistent-store CRUD.
+Code publication does not change financial gates, verify membership or activate an offer.
+
+### Stage publication and runtime integration boundary
+
+The logical `commerce-admin/promotions` action is an authenticated sequence: the shared
+`app-registry` validator runs before `commerce-admin/__secured_promotions`. Selective authoring
+publication updates only the **secured implementation** and `commerce/mcp` code execs.
+Keep the sequence, its components, opaque parameters, annotations, limits and package
+configuration unchanged; never replace the authentication sequence with a code ZIP.
+
+The separate Stage provider/general-offer implementation owns runtime conversion:
+
+- Read an organisation-scoped draft through `createPromotionDraftService({ store }).get(ctx, { id })`
+  using a verified boundary context, not caller-supplied actor fields. Reuse the returned normalized
+  definition and `validateDraftDefinition(promotion, 'update')`; do not add another term validator.
+- Keep the source reference and revision internal. Canonical restriction keys/versions are authoring
+  metadata, not membership evidence. Eligibility comes from the separate live provider.
+- Runtime Planner kind is `climbing_planner`, not the authoring key `climbing-planner`.
+  Shopper offers must not contain draft IDs, AAM IDs, restriction metadata or provider evidence.
+  Preserve the existing Money/discount fields and three v1 offer statuses; do not add an
+  `APPLIED` offer status for an automatically selected candidate.
+- A Stage-demo automatic-discount totals label is separate from `welcomeBack.offer_applied`.
+  A change to the best candidate must not mutate recovery claims or bump cart version.
+- This Stage-only integration is not Production financial activation. It does not enable a C01
+  draft, write it into live `promotions`, or change the frozen v1 authoring contract. The C01
+  envelope remains `financialAuthorization: false` with activation blocked.
+
+Live AAM/provenance and authenticated draft CRUD acceptance can follow implementation.
+Neither deferred acceptance nor the fixture catalogue may be reported as verified live eligibility.
 
 ### C02 audience draft fixture (not a live promotion API)
 
@@ -336,12 +366,22 @@ default off, never inferred from sign-in or checkout). Safety defaults:
 - Email params: `FIRSTNAME`, `CART_URL` (campaign UTM only, shopper signs in), `PERCENT_OFF`,
   `MAX_DISCOUNT`. The Brevo template must state that the store and payment are a demo and include
   Brevo's unsubscribe link.
+- Set `WKND_SHOP_CART_URL` per workspace; the worker passes it as `SHOP_CART_URL`. There is no
+  Production fallback: a missing URL refuses execution before provider calls and leaves the run
+  approved. Production must use `https://wknd-adventures.run.place/shop/cart`. Stage must use a
+  storefront actually configured for Stage Commerce, not merely an EDS preview hostname.
+  The independently verified Stage storefront destination is
+  `https://feat-aam-stage-pilot--masterclass-demo--znikolovski.aem.page/shop/cart`.
+  Stage email configuration remains unconfigured pending authoritative worker input provenance;
+  a source merge or verified storefront route does not configure the worker or authorize sends.
+  Tests and offline template examples do not establish runtime acceptance. Do not reuse `WKND_SITE_ORIGIN`,
+  which is also used for canonical product links.
 
 Actions:
 
 | Action | Type | Params |
 | --- | --- | --- |
-| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED`, `BREVO_API_KEY`, `BREVO_RECOVERY_TEMPLATE_ID`, `RECOVERY_EMAIL_ALLOWLIST`, `RECOVERY_EMAIL_DAILY_BUDGET` |
+| `promotions-worker` | scheduled (~5 min), not web | DB credentials, `RECOVERY_REDEMPTION_VERIFIED`, `BREVO_API_KEY`, `BREVO_RECOVERY_TEMPLATE_ID`, `SHOP_CART_URL`, `RECOVERY_EMAIL_ALLOWLIST`, `RECOVERY_EMAIL_DAILY_BUDGET` |
 | `brevo-webhook` | raw web action, no IMS (optional) | `BREVO_WEBHOOK_TOKEN` (Brevo webhook `Authorization: Bearer …`) |
 
 Suppression does not depend on the webhook: before every run `executeRun` pulls Brevo's

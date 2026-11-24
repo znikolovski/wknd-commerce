@@ -22,8 +22,8 @@ Implementation references:
 - [Real-time outbound transfers](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/implementation-integration-guides/receiving-audience-data/real-time-outbound-transfers/real-time-outbound-transfers)
 - [Digitally signed HTTP requests](https://experienceleague.adobe.com/en/docs/audience-manager/user-guide/implementation-integration-guides/receiving-audience-data/real-time-outbound-transfers/digitally-signed-http-requests)
 
-Configure HMAC **SHA256**, with base64 output in the agreed signature header (proposed
-`x-aam-signature`). The signature covers the **exact POST body**, not a JSON reserialization.
+Configure HMAC **SHA256**, with base64 output in the agreed signature header
+`x-aam-signature`. The signature covers the **exact POST body**, not a JSON reserialization.
 MD5/SHA1/unsigned requests are unsupported. A dedicated >=32-byte random signing key must be
 shared securely with Adobe and injected as `WKND_AAM_SIGNATURE_SECRET`; do not paste it into
 chat, URLs, Git, logs or a shared global format. Coordinate rotations with Adobe.
@@ -55,7 +55,9 @@ failure or the 2500ms persistence deadline return non200; the retry can confirm 
 committed complete document. No Brevo/identity/Target calls occur on the acknowledgement path.
 Warm/cold Runtime + DB latency and expected delivery volume still require real destination
 verification; unit timing is not a Production SLA. Limits are defensive payload limits, not
-a delivery throttle. Do not enable until the selected format and capacity meet these bounds.
+a delivery throttle. Confirm the selected format fits these bounds and obtain explicit
+population/write approval before arming intake. Real acknowledgement timing remains a
+separate acceptance check, not a claim inferred from configuration.
 
 ## Durable processing and ordering
 
@@ -149,7 +151,8 @@ approved scheduler to run regularly; no immediate upstream deletion SLA is claim
 ## Configuration confirmation checklist
 
 All `WKND_AAM_*` inputs are documented in [.env.example](../.env.example).
-Before activation confirm:
+Confirm protocol, scope, signing, storage and export/write approval before arming intake.
+Identity export, list permissions and reconciliation are separate consumer gates:
 
 | Actual destination/server field | Receiver setting / requirement |
 | --- | --- |
@@ -163,8 +166,8 @@ Before activation confirm:
 | Foreign Client ID / PID_ALIAS | Coordinator-selected `wknd-commerce-brevo-production`; must match `WKND_AAM_CLIENT_ID` |
 | Destination ORDER_ID | Saved `120278` -> `WKND_AAM_DESTINATION_ID` |
 | Saved destination labels | `ONSITE_PERSONALIZATION`, `PII`; preserve these and source export controls, not proof of permitted alias export |
-| User DPID and actual dpUuid | `1547309` candidate only; prove export is the existing exact `wpa_...` alias |
-| Segment mapping aliases | Confirm actual exported `seg.traitAlias`; retain existing source IDs; numeric exact `WKND_AAM_SEGMENT_ALLOWLIST` |
+| User DPID and actual dpUuid | Signed intake scope `1547309`; before consumers, prove export is the existing exact `wpa_...` alias |
+| Segment mapping aliases | Selected source `27507404`, registry label `Climbing Planner`; configure numeric export alias `27507404`, matching the sole allowlist entry; actual export still requires capture |
 | Environment | `production`, exact Runtime namespace `28538-wkndcommerce` |
 | TTL, batching and capacity | Approved TTL + <=50 segments/user + DB durable writes and <3s real acknowledgement |
 | List map and suppression | Confirm existing dedicated Brevo lists, no sends/automations, API key and existing-contact read/list permissions |
@@ -180,33 +183,69 @@ settings now have inbound and Outbound S2S enabled, sharing=false, and the
 Do not substitute another source or relax its export controls. Outbound eligibility and a stale
 raw-sub description do not prove that format285 exports the required server person alias.
 
-Keep
-`RECEIVER_ENABLED`, `WORKER_ENABLED`, `COMMERCE_READ_ENABLED`, `CONFIG_VERIFIED`,
-`IDENTITY_MAPPING_VERIFIED`, `IDENTITY_REGISTRATION_ENABLED`, `BREVO_SYNC_ENABLED` and
-`BREVO_LISTS_VERIFIED` false until their individual conditions are met. No scheduler is added
-automatically. A disabled endpoint may be published solely for setup; it returns 404 and
-performs no DB/provider calls. A saved realtime-selected, unmapped destination is not live
-qualification. Confirm actual destination ID, permitted export and exact `DataPartner_UUID`
-alias mapping before mapping any audiences or enabling receiver/consumer gates.
+Keep `WORKER_ENABLED`, `COMMERCE_READ_ENABLED`, `IDENTITY_MAPPING_VERIFIED`,
+`IDENTITY_REGISTRATION_ENABLED`, `BREVO_SYNC_ENABLED` and `BREVO_LISTS_VERIFIED` false until
+their separately approved conditions are met. No scheduler is added automatically. A disabled
+endpoint may be published solely for setup; it returns 404 and performs no DB/provider calls.
+A saved realtime-selected, unmapped destination is not live qualification.
 
-### Smallest controlled export validation
+### Approved full-population intake and capture
 
-The disabled receiver now has destination120278/client/DPID scope and the same private signing
-key bound. This is setup only. Live diagnostic0.0.5 has the existing person receipt transport
-but not this PR's registration initializer; live storefront0.0.26 does not expose the shared
-membership field. Neither existing action was changed for destination setup.
+The user explicitly authorized **"Authorize full eligible-segment export and queued intake
+records"**. Mapping one segment can export all eligible members, including initial backlog and
+in-flight transfers. Neither MaxUsers10, sampling denominator1, a single captured receipt nor
+later unmapping bounds total recipients or writes. Unknown/unconsented identities may be
+stored pseudonymously in the approved durable inbox. This is not a one-shopper test.
 
-With separate approval for one controlled test, use one existing already-qualified shopper
-with an existing explicit idLinkage grant and a fresh authenticated `person-status` receipt
-(no alias mint or grant creation). Confirm one existing segment's actual export alias, scope
-the intake allowlist/TTL to that test, and map only that segment to destination120278 while
-enabling **intake only**. Receive one genuine signed transfer and compare its normalized
-identityKey with SHA256(JSON.stringify([scopeKey, receipt.personAlias])); never print the raw
-alias/payload. Keep the worker, identity verification, Commerce/Brevo consumers OFF. Restore
-intake OFF and remove the controlled mapping after capture. Matching the current receipt
-proves that export's identity, not membership-provider or consumer activation.
-This test does not require publishing the registration initializer first; that separately
-gated source publication is needed later for persistent consumer identity resolution.
+Production `aam/receiver` **0.0.4** is armed for signed **intake only**, scoped to
+destination120278 / client `wknd-commerce-brevo-production` / DPID1547309 / environment
+`production`. `AAM_RECEIVER_ENABLED` and this action's `AAM_CONFIG_VERIFIED` are true;
+the latter confirms the intake contract, not identity export or consumer readiness.
+The original executable, annotations, limits and publish state are unchanged. Package inputs
+and all other actions remain unchanged; the private worker is still disabled0.0.1.
+
+The existing Production workspace4566206088345849900 credentials were privately installed as
+`__ims_oauth_s2s` with `__ims_env=prod`. The IMS annotation alone had not installed these defaults
+when the new action was created. A real read-only Database Storage connection and catalog/inbox
+queries passed using that same namespace and workspace. Local SDK checks must supply Runtime
+namespace `28538-wkndcommerce`; a missing local namespace is not evidence of an auth denial.
+Never replay opaque GET parameters or print credentials. The same private signing key remains
+bound (SHA256 fingerprint prefix `00b2a53b93c6`), without regeneration or clipboard changes.
+
+The sole allowlist entry is numeric export alias **27507404**, for existing registry source
+**27507404 / Climbing Planner** (`climbing-planner`). Observation TTL is **3600000ms (one hour)**,
+measured from last verification. It is not inbox retention: queued records remain durable until
+operator review, without automatic purge. Payload limits remain unchanged.
+
+Next manual step for the user/coordinator:
+
+1. In destination120278, map only existing source segment27507404 with numeric export mapping
+   value **27507404**. Verify the actual source ID; do not rename it, create a segment or
+   fabricate qualification. If other mappings are present, stop and reconcile scope rather
+   than silently changing them or broadening the receiver allowlist.
+2. Preserve realtime ON, batch OFF, format285/server5030, source export controls and labels.
+   Backend code does not perform Adobe UI writes.
+3. Monitor scoped inbox count and recent complete queued receipts read-only. Report aggregate
+   event/identity counts, segment IDs and receipt timing; never log raw bodies, aliases, emails
+   or signatures. Correlate genuine Runtime responses with complete durable receipts and
+   inspect actual HTTP200/latency. Missing, rejected or uncertain delivery is not acceptance.
+4. When an existing explicitly consenting demo identity's fresh authenticated `person-status`
+   receipt is available, compare its expected
+   SHA256(JSON.stringify([scopeKey, receipt.personAlias])) privately with queued identity keys.
+   Do not mint an alias or grant. A match proves that observed export's identity only, not
+   full-population identity coverage, qualification or consumer activation.
+
+As of `2026-11-24T09:00:35Z`, the scoped inbox count is **0**. Unsigned HTTPS returns
+401 `SIGNATURE_INVALID`; Production DB reads pass. No genuine signed durable acceptance,
+HTTP200 or real delivery latency is yet verified, and no synthetic signed body was sent.
+The first actual approved export supplies this evidence; do not claim an end-to-end pass
+from the unsigned smoke or a read-only DB check.
+
+Live diagnostic0.0.5 has the existing person receipt transport but not this PR's registration
+initializer; live storefront0.0.26 does not expose the shared membership field. Neither action
+was changed for destination setup. Registration publication and all downstream consumers
+remain separately gated. No contacts, lists, campaigns, grants or financial settings were
+changed by arming intake.
 
 Canonical engagement rules/trait alignment remain separate: this receiver ingests actual
 destination observations; it does not invent quiz/navigation/kit events or change existing IDs.

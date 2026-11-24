@@ -85,6 +85,21 @@ extend type Customer {
   wknd_recovery_email_opt_in: Boolean!
   "Separate explicit opt-in to WKND news & offers emails (never implied by cart-reminder consent)."
   wknd_marketing_email_opt_in: Boolean!
+  "Verified destination observations for this shopper; display-only, never financial authorization. Empty while disabled."
+  wknd_aam_memberships: [WkndAamMembership!]!
+}
+
+enum WkndAamMembershipStatus {
+  UNKNOWN
+  MEMBER
+  WITHDRAWN
+}
+
+type WkndAamMembership {
+  segment_id: String!
+  status: WkndAamMembershipStatus!
+  expires_at: String
+  financial_authorization: Boolean!
 }
 
 "Where the shopper gave or withdrew consent."

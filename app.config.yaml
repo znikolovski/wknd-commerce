@@ -60,6 +60,16 @@ application:
               TARGET_ID_DPID: $WKND_TARGET_ID_DPID
               TARGET_ID_LEASE_MS: $WKND_TARGET_ID_LEASE_MS
               TARGET_ID_TIMEOUT_MS: $WKND_TARGET_ID_TIMEOUT_MS
+              AAM_COMMERCE_READ_ENABLED: $WKND_AAM_COMMERCE_READ_ENABLED
+              AAM_CONFIG_VERIFIED: $WKND_AAM_CONFIG_VERIFIED
+              AAM_ENVIRONMENT: $WKND_AAM_ENVIRONMENT
+              AAM_CLIENT_ID: $WKND_AAM_CLIENT_ID
+              AAM_DESTINATION_ID: $WKND_AAM_DESTINATION_ID
+              AAM_USER_DPID: $WKND_AAM_USER_DPID
+              AAM_SEGMENT_ALLOWLIST: $WKND_AAM_SEGMENT_ALLOWLIST
+              AAM_MEMBERSHIP_TTL_MS: $WKND_AAM_MEMBERSHIP_TTL_MS
+              AAM_IDENTITY_FORMAT: $WKND_AAM_IDENTITY_FORMAT
+              AAM_IDENTITY_MAPPING_VERIFIED: $WKND_AAM_IDENTITY_MAPPING_VERIFIED
             annotations:
               require-adobe-auth: false
               include-ims-credentials: true
@@ -163,6 +173,15 @@ application:
               TARGET_ID_DPID: $WKND_TARGET_ID_DPID
               TARGET_ID_LEASE_MS: $WKND_TARGET_ID_LEASE_MS
               TARGET_ID_TIMEOUT_MS: $WKND_TARGET_ID_TIMEOUT_MS
+              AAM_IDENTITY_REGISTRATION_ENABLED: $WKND_AAM_IDENTITY_REGISTRATION_ENABLED
+              AAM_CONFIG_VERIFIED: $WKND_AAM_CONFIG_VERIFIED
+              AAM_IDENTITY_FORMAT: $WKND_AAM_IDENTITY_FORMAT
+              AAM_ENVIRONMENT: $WKND_AAM_ENVIRONMENT
+              AAM_CLIENT_ID: $WKND_AAM_CLIENT_ID
+              AAM_DESTINATION_ID: $WKND_AAM_DESTINATION_ID
+              AAM_USER_DPID: $WKND_AAM_USER_DPID
+              AAM_SEGMENT_ALLOWLIST: $WKND_AAM_SEGMENT_ALLOWLIST
+              AAM_MEMBERSHIP_TTL_MS: $WKND_AAM_MEMBERSHIP_TTL_MS
             annotations:
               require-adobe-auth: false
               include-ims-credentials: true
@@ -274,6 +293,56 @@ application:
           promotions-worker-rule:
             trigger: promotions-worker-tick
             action: promotions-worker
+      aam:
+        license: Apache-2.0
+        inputs:
+          AAM_CONFIG_VERIFIED: $WKND_AAM_CONFIG_VERIFIED
+          AAM_ENVIRONMENT: $WKND_AAM_ENVIRONMENT
+          AAM_CLIENT_ID: $WKND_AAM_CLIENT_ID
+          AAM_DESTINATION_ID: $WKND_AAM_DESTINATION_ID
+          AAM_USER_DPID: $WKND_AAM_USER_DPID
+          AAM_SEGMENT_ALLOWLIST: $WKND_AAM_SEGMENT_ALLOWLIST
+          AAM_MEMBERSHIP_TTL_MS: $WKND_AAM_MEMBERSHIP_TTL_MS
+        actions:
+          receiver:
+            function: actions/aam-receiver/index.js
+            runtime: nodejs:22
+            web: 'raw'
+            inputs:
+              AAM_RECEIVER_ENABLED: $WKND_AAM_RECEIVER_ENABLED
+              AAM_SIGNATURE_ALGORITHM: $WKND_AAM_SIGNATURE_ALGORITHM
+              AAM_SIGNATURE_HEADER: $WKND_AAM_SIGNATURE_HEADER
+              AAM_SIGNATURE_SECRET: $WKND_AAM_SIGNATURE_SECRET
+            annotations:
+              require-adobe-auth: false
+              include-ims-credentials: true
+              final: true
+            limits:
+              timeout: 30000
+              memorySize: 256
+          worker:
+            function: actions/aam-worker/index.js
+            runtime: nodejs:22
+            web: 'no'
+            inputs:
+              AAM_WORKER_ENABLED: $WKND_AAM_WORKER_ENABLED
+              AAM_IDENTITY_FORMAT: $WKND_AAM_IDENTITY_FORMAT
+              AAM_IDENTITY_MAPPING_VERIFIED: $WKND_AAM_IDENTITY_MAPPING_VERIFIED
+              AAM_BREVO_SYNC_ENABLED: $WKND_AAM_BREVO_SYNC_ENABLED
+              AAM_BREVO_LISTS: $WKND_AAM_BREVO_LISTS
+              AAM_BREVO_LISTS_VERIFIED: $WKND_AAM_BREVO_LISTS_VERIFIED
+              BREVO_API_KEY: $WKND_BREVO_API_KEY
+              AUTH0_ISSUER: $WKND_AUTH0_ISSUER
+              TARGET_PERSON_ALIAS_APPROVED: $WKND_TARGET_PERSON_ALIAS_APPROVED
+              TARGET_ID_LINKAGE_ENABLED: $WKND_TARGET_ID_LINKAGE_ENABLED
+              TARGET_ID_BINDING_STORE_APPROVED: $WKND_TARGET_ID_BINDING_STORE_APPROVED
+              TARGET_ID_ORG_ID: $WKND_TARGET_ID_ORG_ID
+              TARGET_ID_DPID: $WKND_TARGET_ID_DPID
+            annotations:
+              include-ims-credentials: true
+            limits:
+              timeout: 120000
+              memorySize: 512
 extensions:
   aem/assets/assetsview/1:
     $include: src/aem-assets-assetsview-1/ext.config.yaml

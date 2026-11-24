@@ -2,6 +2,10 @@
 
 Status: **Production deployed; person-alias capability explicitly approved for the demo rollout.
 Fresh manifest defaults remain OFF. Stage alias capability is unchanged/OFF.**
+
+The separate [AAM S2S receiver](AAM-S2S-RECEIVER.md) can register an existing confirmed
+first-party person receipt under its own disabled-by-default destination scope. It does not
+change this public v1 DTO, grant consent, enable a destination or authorize financial use.
 - `actions/target-diagnostic` (manifest entry, deploy gate), `lib/target-diagnostic-action.js`,
   `lib/target-diagnostic.js`, `lib/target-id-binding.js`, `lib/target-binding-store.js` and
   `lib/id-linkage-consent.js` exist, with offline tests.

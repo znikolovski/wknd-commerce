@@ -158,7 +158,8 @@ Before activation confirm:
 | MaxUsers | <=10; signed total count must agree |
 | Authentication | None **only for HTTP auth**; SHA256 HMAC remains mandatory |
 | HTTP signature header / algorithm / key | `x-aam-signature` / SHA256 / securely injected same private key |
-| Realtime server / format | Dedicated server + confirmed format285; do not change the shared format |
+| Realtime server / format | Dedicated server5030 + confirmed format285; do not change the shared format |
+| Target Data Source | Required: source1547309 / integration code `wkndCustomerId`; the Admin list includes only Outbound-enabled sources |
 | Foreign Client ID / PID_ALIAS | Coordinator-selected `wknd-commerce-brevo-production`; must match `WKND_AAM_CLIENT_ID` |
 | Destination ORDER_ID | Actual saved ID -> `WKND_AAM_DESTINATION_ID`; never invent one |
 | User DPID and actual dpUuid | `1547309` candidate only; prove export is the existing exact `wpa_...` alias |
@@ -168,12 +169,25 @@ Before activation confirm:
 | List map and suppression | Confirm existing dedicated Brevo lists, no sends/automations, API key and existing-contact read/list permissions |
 | Privacy/retention/reconciliation | Approve receiver data retention, sticky withdrawal handling and regular private worker schedule |
 
-Keep realtime/batch delivery **OFF** while saving the dedicated server/destination. Keep
+The actual Admin creation form requires a Target Data Source and at least one delivery mode.
+For this setup, select **realtime**, leave **batch OFF**, and save the new destination with
+**no segments mapped**. Selecting a required delivery mode is not receiver or consumer activation.
+
+If source1547309 is absent from Target Data Source, its current `outboundS2S:false` excludes it
+from the Admin's `outboundOnly:true` query. In the normal Data Sources editor, enable **only
+Outbound** on that existing source, preserving inbound S2S, ID/integration code, sharing=false,
+and the `ONSITE_AD_TARGETING` / `OFFSITE_AD_TARGETING` restrictions and all remaining settings.
+Do not substitute another source or relax its export controls. Outbound eligibility and a stale
+raw-sub description do not prove that format285 exports the required server person alias.
+
+Keep
 `RECEIVER_ENABLED`, `WORKER_ENABLED`, `COMMERCE_READ_ENABLED`, `CONFIG_VERIFIED`,
 `IDENTITY_MAPPING_VERIFIED`, `IDENTITY_REGISTRATION_ENABLED`, `BREVO_SYNC_ENABLED` and
 `BREVO_LISTS_VERIFIED` false until their individual conditions are met. No scheduler is added
 automatically. A disabled endpoint may be published solely for setup; it returns 404 and
-performs no DB/provider calls. A saved inactive destination is not live qualification.
+performs no DB/provider calls. A saved realtime-selected, unmapped destination is not live
+qualification. Confirm actual destination ID, permitted export and exact `DataPartner_UUID`
+alias mapping before mapping any audiences or enabling receiver/consumer gates.
 
 Canonical engagement rules/trait alignment remain separate: this receiver ingests actual
 destination observations; it does not invent quiz/navigation/kit events or change existing IDs.

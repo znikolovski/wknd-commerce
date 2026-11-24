@@ -17,6 +17,8 @@ export default function AudienceDraftPreview () {
   const [items, setItems] = useState([])
   const [nextAfter, setNextAfter] = useState(null)
   const [createKey, setCreateKey] = useState(() => window.crypto?.randomUUID?.())
+  const [activationKey, setActivationKey] = useState(() => window.crypto?.randomUUID?.())
+  const [confirmed, setConfirmed] = useState(false)
   const change = (setter) => (value) => { setter(value); setResult(null); setError(null) }
   useEffect(() => {
     let current = true
@@ -50,6 +52,7 @@ export default function AudienceDraftPreview () {
     try {
       const data = await callAdmin(ims, `promotions.drafts.${method}`, args, { endpoint: 'promotions' })
       if (!data.ok) {
+        if (data.draft) open(data.draft)
         const fields = (data.error?.fields || []).map((f) => `${f.path}: ${f.message}`).join('; ')
         setError(`${data.error?.message || 'Draft rejected.'}${fields ? ` ${fields}` : ''}`)
         return null
@@ -64,6 +67,11 @@ export default function AudienceDraftPreview () {
   }
 
   const open = (draft) => {
+    if (draft.activation?.idempotencyKey) setActivationKey(draft.activation.idempotencyKey)
+    if (draft.id !== editing?.id || draft.revision !== editing?.revision) {
+      setActivationKey(draft.activation?.idempotencyKey || window.crypto?.randomUUID?.())
+      setConfirmed(false)
+    }
     setEditing(draft)
     setName(draft.promotion.name)
     setAudienceKey(draft.promotion.audienceRestriction.key)
@@ -107,13 +115,22 @@ export default function AudienceDraftPreview () {
       setCreateKey(window.crypto?.randomUUID?.())
     }
   }
+  const activate = async () => {
+    const data = await request('activate', {
+      id: editing.id, expectedRevision: editing.revision, idempotencyKey: activationKey,
+      confirmation: 'Activate Target-backed DEMO offer'
+    })
+    if (data) { open(data.draft); setResult(data) }
+  }
+  const demoAvailable = catalogue?.activation?.blocked === false
+  const locked = Boolean(editing?.activation)
 
   return (
     <View borderWidth='thin' borderColor='gray-300' borderRadius='medium' padding='size-250' marginBottom='size-300'>
       <Heading level={2} marginTop={0}>Audience promotion drafts</Heading>
       <InlineAlert variant='info' marginBottom='size-200'>
-        <Heading>{catalogue?.environment === 'production' ? 'Production' : catalogue?.environment === 'stage' ? 'Stage' : 'Catalogue unavailable'}. Activation blocked.</Heading>
-        <Content>Canonical AAM metadata, not membership evidence. Disabled drafts can be saved without live eligibility. Draft storage is separate from active promotions; enabling and applying restricted offers remain blocked. No shopper evaluation or financial authorization.</Content>
+        <Heading>{catalogue?.environment === 'production' ? 'Production' : catalogue?.environment === 'stage' ? 'Stage' : 'Catalogue unavailable'}. {demoAvailable ? 'Target-backed DEMO activation available.' : 'Activation blocked.'}</Heading>
+        <Content>Canonical AAM metadata is not membership evidence. {demoAvailable ? 'An IMS operator may activate demo discounts. Server Target decisions require authenticated shopper identity, current idLinkage consent and server-bound alias. Unknown or nonqualified shoppers receive no restricted discount. Evidence: false; not verified AAM financial membership.' : 'Server demo eligibility is not configured. Disabled drafts can still be saved; activation is unavailable.'}</Content>
       </InlineAlert>
       <Form aria-label='Audience promotion draft' maxWidth='size-6000' isDisabled={pending || !catalogue} onSubmit={(e) => { e.preventDefault(); if (catalogue) preview() }}>
         <TextField label='Draft name' value={name} onChange={change(setName)} isRequired maxLength={120} />
@@ -122,18 +139,25 @@ export default function AudienceDraftPreview () {
         </RadioGroup>
         <NumberField label={editing?.promotion.discount.kind === 'fixed' ? 'Fixed discount (AUD)' : 'Discount percentage'} value={percent} onChange={change(setPercent)} minValue={0.01} maxValue={editing?.promotion.discount.kind === 'fixed' ? 1000000 : 100} step={0.01} />
         <NumberField label='Maximum discount (AUD, optional)' value={cap} onChange={change(setCap)} minValue={0.01} step={0.01} />
-        <Text>{editing ? `${editing.id}, revision ${editing.revision}. Other terms are preserved; see the full JSON.` : 'New automatic offer, all products, disabled. Financial activation is not available.'}</Text>
+        <Text>{editing ? `${editing.id}, revision ${editing.revision}. Other terms are preserved; see the full JSON.` : 'New automatic offer, all products, disabled until explicitly approved for demo activation.'}</Text>
         <Button variant='secondary' onPress={preview} isPending={pending} isDisabled={pending || !catalogue || !name.trim() || !Number.isFinite(percent)}>
           Validate draft
         </Button>
-        <Button variant='accent' onPress={save} isDisabled={pending || !catalogue || !name.trim() || !Number.isFinite(percent)}>{editing ? 'Save draft changes' : 'Save disabled draft'}</Button>
-        {editing && <Button variant='negative' onPress={remove} isDisabled={pending}>Delete draft</Button>}
+        <Button variant='accent' onPress={save} isDisabled={pending || locked || !catalogue || !name.trim() || !Number.isFinite(percent)}>{editing ? 'Save draft changes' : 'Save disabled draft'}</Button>
+        {editing && <Button variant='negative' onPress={remove} isDisabled={pending || locked}>Delete draft</Button>}
+        {editing && demoAvailable && editing.state !== 'activated-demo' && <>
+          <Button variant='secondary' onPress={() => setConfirmed(!confirmed)} isDisabled={pending}>
+            {confirmed ? 'Demo activation confirmed' : 'Confirm saved terms: activate Target-backed DEMO offer'}
+          </Button>
+          <Text>Activation uses saved revision {editing.revision}, not unsaved form edits. No verified AAM membership claim. After activation, manage or disable the live promotion in Promotions.</Text>
+          <Button variant='accent' onPress={activate} isDisabled={pending || !confirmed || !activationKey}>Activate saved demo offer</Button>
+        </>}
         <Button variant='secondary' isDisabled={pending} onPress={() => {
-          setEditing(null); setName('Climbing audience demo'); setPercent(10); setCap(25); setResult(null); setError(null); setCreateKey(window.crypto?.randomUUID?.())
+          setEditing(null); setName('Climbing audience demo'); setPercent(10); setCap(25); setResult(null); setError(null); setCreateKey(window.crypto?.randomUUID?.()); setConfirmed(false)
         }}>New draft</Button>
       </Form>
       {error && <InlineAlert variant='negative' marginY='size-200'><Heading>Draft request failed</Heading><Content>{error}</Content></InlineAlert>}
-      {result && <TextArea label={result.persisted ? 'Saved draft JSON (not active)' : 'Validated draft JSON (not saved)'} value={JSON.stringify(result, null, 2)} isReadOnly width='100%' height='size-3600' marginTop='size-200' />}
+      {result && <TextArea label={result.draft?.state === 'activated-demo' ? 'Activated DEMO promotion JSON' : result.persisted ? 'Saved draft JSON (not active)' : 'Validated draft JSON (not saved)'} value={JSON.stringify(result, null, 2)} isReadOnly width='100%' height='size-3600' marginTop='size-200' />}
       <Button variant='secondary' onPress={() => load()} isDisabled={pending || !catalogue} marginTop='size-200'>Load saved drafts</Button>
       {items.map((draft) => <View key={draft.id} marginTop='size-100'>
         <Text>{draft.promotion.name} - {draft.promotion.audienceRestriction.key} - revision {draft.revision}</Text>

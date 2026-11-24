@@ -552,6 +552,12 @@ type Query {
   """
   wkndPlannerOffer(cart_id: String!): WkndRecoveryOffer!
   of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
+
+  """
+  Approved partial kits that win the projected completed cart's single-promotion evaluation.
+  Display only: adding remaining exact SKUs re-evaluates current price, stock and eligibility.
+  """
+  wkndBundleOffers(cart_id: String!): [WkndBundleOffer!]!
 }
 
 """"""
@@ -22972,4 +22978,22 @@ type Of1Discovery {
 type Of1Suggestion {
   label: String!
   query: String!
+}
+
+type WkndBundleOfferComponent {
+  sku: String!
+  name: String!
+  required_quantity: Int!
+  cart_quantity: Int!
+  missing_quantity: Int!
+  unit_price: Money!
+}
+
+type WkndBundleOffer {
+  promotion_id: String!
+  bundle_id: String!
+  name: String!
+  quote_expires_at: String!
+  saving: Money!
+  components: [WkndBundleOfferComponent!]!
 }

@@ -12,6 +12,7 @@ const { migrateLegacyPromotions } = require('../lib/promotions');
 const { bootstrapRecoveryPromotion, promotionIdFor, DEFAULT_CAMPAIGN } = require('../lib/recovery-policy');
 const { createPromotionsAdmin, imsOperatorFrom } = require('../lib/promotions-admin');
 jest.mock('../lib/store', () => ({ ...jest.requireActual('../lib/store'), getStore: jest.fn() }));
+jest.mock('@adobe/aio-lib-core-logging', () => jest.fn(() => ({ error: jest.fn() })));
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
 const ORG = 'ORG@AdobeOrg';
@@ -120,6 +121,73 @@ describe('promotions', () => {
 
   test('unknown operations are rejected', async () => {
     await expect(api.handle(ava, 'email.executeRun', {})).rejects.toMatchObject({ status: 400 });
+  });
+});
+
+describe('audience draft action boundary', () => {
+  const SERVER_VALUE = 'server-only-runtime-value';
+  const defaults = () => ({
+    ...PARAMS,
+    __ims_env: SERVER_VALUE, __ims_oauth_s2s: { client_secret: SERVER_VALUE },
+    AUTH0_ISSUER: 'https://example.auth0.com/', AUTH0_AUDIENCE: SERVER_VALUE,
+    __ow_path: '/commerce-admin/promotions', __ow_method: 'post',
+    __ow_headers: headersFor(ava.subject),
+    CONTENT_AI_URL: SERVER_VALUE, CONTENT_AI_SOURCE: SERVER_VALUE,
+    AEM_AUTHOR_URL: SERVER_VALUE, AEM_PRODUCTS_ROOT: SERVER_VALUE,
+    PRERENDER_ACTION: SERVER_VALUE, PROMOTION_CURSOR_KEY: SERVER_VALUE,
+    PROMOTION_SELECTION: SERVER_VALUE, LOG_LEVEL: 'info',
+    RECOVERY_EMAIL_ALLOWLIST: SERVER_VALUE, RECOVERY_EMAIL_DAILY_BUDGET: SERVER_VALUE,
+    TARGET_DIAG_ENABLED: 'false', TARGET_DIAG_SHOPPER_KEYS: SERVER_VALUE,
+    TARGET_ID_ORG_ID: SERVER_VALUE, STAGE_AAM_GENERAL_OFFERS_ENABLED: 'false',
+  });
+  const restrictedDraft = () => draft({
+    audienceRestriction: { environment: 'stage', key: 'climbing-interest', version: 1 },
+  });
+  const invoke = async (request, raw = false) => {
+    require('../lib/store').getStore.mockResolvedValue(store);
+    const { main } = require('../actions/promotions-admin');
+    return main({ ...defaults(), ...(raw ? { __ow_body: JSON.stringify(request) } : request) });
+  };
+
+  test('real non-raw action excludes Runtime defaults/credentials/transport fields from every strict draft CRUD operation', async () => {
+    const validated = await invoke({ op: 'promotions.drafts.validate', promotion: restrictedDraft() });
+    expect(validated).toMatchObject({ statusCode: 200, body: { ok: true, persisted: false } });
+    const created = await invoke({
+      op: 'promotions.drafts.create', idempotencyKey: crypto.randomUUID(), promotion: restrictedDraft(),
+    });
+    expect(created).toMatchObject({ statusCode: 200, body: { ok: true, draft: { revision: 1 } } });
+    const { id, promotion } = created.body.draft;
+    const listed = await invoke({ op: 'promotions.drafts.list', limit: 50 });
+    expect(listed).toMatchObject({ statusCode: 200, body: { ok: true, items: [created.body.draft] } });
+    const opened = await invoke({ op: 'promotions.drafts.get', id });
+    expect(opened).toMatchObject({ statusCode: 200, body: { ok: true, draft: { id } } });
+    const updated = await invoke({
+      op: 'promotions.drafts.update', id, expectedRevision: 1, promotion: { ...promotion, name: 'Updated draft' },
+    });
+    expect(updated).toMatchObject({ statusCode: 200, body: { ok: true, draft: { revision: 2 } } });
+    const removed = await invoke({ op: 'promotions.drafts.delete', id, expectedRevision: 2 });
+    expect(removed).toMatchObject({ statusCode: 200, body: { ok: true, deleted: true } });
+    const stored = await store.collection('promotion_drafts_v2').findOne({ id });
+    expect(stored.promotion).toEqual({ ...promotion, name: 'Updated draft' });
+    expect(JSON.stringify([validated, created, listed, opened, updated, removed, stored])).not.toContain(SERVER_VALUE);
+    expect(JSON.stringify(require('@adobe/aio-lib-core-logging').mock.results.map((r) => r.value.error.mock.calls)))
+      .not.toContain(SERVER_VALUE);
+    expect(require('../lib/store').getStore).toHaveBeenCalledWith(expect.objectContaining({ __ims_oauth_s2s: { client_secret: SERVER_VALUE } }));
+  });
+
+  test.each([false, true])('genuine unknown client DTO fields still fail strict validation (raw=%s)', async (raw) => {
+    const result = await invoke({ op: 'promotions.drafts.list', unexpectedClientField: 'client-only' }, raw);
+    expect(result).toMatchObject({ statusCode: 200, body: { ok: false, error: { code: 'INVALID_DRAFT' } } });
+    expect(JSON.stringify(result.body.error.fields)).toContain('unexpectedClientField');
+    expect(JSON.stringify(result)).not.toContain(SERVER_VALUE);
+  });
+
+  test('raw request extraction does not silently remove client keys that resemble server configuration', async () => {
+    const result = await invoke({ op: 'promotions.drafts.list', LOG_LEVEL: 'client-field' }, true);
+    expect(result).toMatchObject({ statusCode: 200, body: { ok: false, error: { code: 'INVALID_DRAFT' } } });
+    expect(JSON.stringify(result.body.error.fields)).toContain('LOG_LEVEL');
+    const listed = await invoke({ op: 'promotions.drafts.list' }, true);
+    expect(listed).toMatchObject({ statusCode: 200, body: { ok: true, items: [] } });
   });
 });
 

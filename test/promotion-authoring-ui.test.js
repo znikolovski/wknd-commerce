@@ -5,6 +5,9 @@ const { default: AudienceDraftPreview } = require('../src/dx-excshell-1/web-src/
 const { createMemoryStore } = require('../lib/store');
 const { createPromotionsAdmin } = require('../lib/promotions-admin');
 const { randomUUID } = require('node:crypto');
+const { importCatalog } = require('../lib/importer');
+const { migrateLegacyPromotions } = require('../lib/promotions');
+const { NS, params } = require('./fixtures/demo-audience');
 
 jest.mock('../src/dx-excshell-1/web-src/src/api', () => ({ callAdmin: jest.fn() }));
 jest.mock('../src/dx-excshell-1/web-src/src/shell-context', () => ({ useShell: () => ({ ims: { token: 'test-token', org: 'test-org' } }) }));
@@ -99,4 +102,32 @@ test('UI uses the server Production catalogue environment, never a hard-coded St
   expect(JSON.parse(root().findByType('TextArea').props.value)).toMatchObject({
     financialAuthorization: false, activation: { blocked: true }, availability: { status: 'unavailable' },
   });
+});
+
+test('server-ready Production UI confirms and activates only the saved revision as an explicitly labelled demo', async () => {
+  act(() => renderer.unmount());
+  const store = createMemoryStore();
+  await importCatalog(store, require('../data/catalog.json'), { replace: true });
+  await migrateLegacyPromotions(store);
+  const api = createPromotionsAdmin({ store, params, namespace: NS });
+  callAdmin.mockImplementation(async (_ims, op, args) => api.handle({ kind: 'ims-operator', subject: 'author', orgId: 'test-org' }, op, args));
+  await act(async () => { renderer = create(React.createElement(AudienceDraftPreview)); });
+  expect(text()).toContain('Target-backed DEMO activation available');
+  await act(async () => button('Save disabled draft').props.onPress());
+  const saved = JSON.parse(root().findByType('TextArea').props.value).draft;
+  expect(button('Activate saved demo offer').props.isDisabled).toBe(true);
+  act(() => root().findByType('TextField').props.onChange('Unsaved terms must not activate'));
+  await act(async () => button('Confirm saved terms: activate Target-backed DEMO offer').props.onPress());
+  expect(button('Activate saved demo offer').props.isDisabled).toBe(false);
+  await act(async () => button('Activate saved demo offer').props.onPress());
+  expect(callAdmin).toHaveBeenCalledWith(expect.any(Object), 'promotions.drafts.activate', {
+    id: saved.id, expectedRevision: saved.revision, idempotencyKey: expect.any(String),
+    confirmation: 'Activate Target-backed DEMO offer',
+  }, { endpoint: 'promotions' });
+  const activated = JSON.parse(root().findByType('TextArea').props.value);
+  expect(activated).toMatchObject({
+    activation: { mode: 'target-backed-demo', evidence: false },
+    draft: { state: 'activated-demo', promotion: { name: saved.promotion.name } },
+  });
+  expect(button('Activate saved demo offer')).toBeUndefined();
 });

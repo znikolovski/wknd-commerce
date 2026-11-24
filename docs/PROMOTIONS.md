@@ -15,6 +15,8 @@ offer and thin management adapters (Commerce MCP). Frozen specification:
 | `lib/promotion-effects.js` | Durable effect intent + global promotion invalidation (never product sale prices or PDP prerenders) |
 | `lib/recovery-policy.js` | Protected recovery policy (10%, AUD 25 cap), 55m–7d cohort, entitlements, single-redemption reservation |
 | `lib/shopper-audiences.js` | Fail-closed audience evidence resolver (no verified AAM provider) |
+| `lib/audience-demo.js` | Canonical restricted-demo capability using the existing authenticated server Target decision route; never verified AAM evidence |
+| `lib/bundle-offers.js` | Public partial-kit projections using the same single-promotion cart evaluator |
 | `scripts/migrate-promotions.mjs` | Explicit idempotent migration, recovery bootstrap, storage capability check |
 
 ## Management service
@@ -33,6 +35,34 @@ preserved on full replacement; enabling requires the separate, explicit confirma
 the current revision. The server rechecks inventory, prices and quote expiry. Aero remains
 a separate demo booking; this UI does not reserve real seats or combine reservations.
 
+**Approval lifetime versus quote freshness:** the 15-minute investigation quote bounds
+create/update/IMS activation review, not an already enabled campaign's lifetime.
+`startsAt`/`endsAt` and `enabled` govern that lifetime (`endsAt: null` has no implicit 15-minute end).
+Every storefront evaluation freshly loads the server catalog, keeps the approved exact SKUs,
+quantities, AUD unit prices, discount terms and safety buffer, and issues a new 15-minute
+in-memory snapshot only when current facts still match. Changed final prices, missing variants,
+non-AUD currency or insufficient buffered inventory fail closed; changed prices require a
+fresh operator-reviewed quote/update, not automatic repricing or approval.
+The stored proposal timestamp and promotion revision are not rewritten by reads.
+Previously the evaluator reused the stored proposal expiry and silently stopped applying
+an enabled rule after 15 minutes; this is a source-reproduced defect, not an observed diagnosis
+of a particular Production cart.
+
+`wkndBundleOffers(cart_id: String!): [WkndBundleOffer!]!` returns only approved enabled
+automatic kits with at least one exact component already present and positive remaining
+quantities. Cart ownership/active-state checks are identical to `cart`; the query is no-store
+and reads fresh server cart/catalog data. Each offer contains `promotion_id`, `bundle_id`,
+`name`, **per-request** `quote_expires_at`, `saving { value currency }`, and
+`components { sku name required_quantity cart_quantity missing_quantity unit_price { value currency } }`.
+Same-SKU cart quantities are aggregated, one kit only. Suggestions are suppressed unless the
+kit wins the projected completed cart against current coupons/automatics, including date,
+minimum-spend and server audience eligibility checks. Saving is the projected complete-cart
+kit discount, not incremental savings or permission to stack discounts.
+Call existing `addProductsToCart` with only the returned exact SKU and missing quantity;
+exact configurable variant SKUs already resolve server-side without `selected_options`.
+Refresh the cart afterward; the real cart/order evaluator remains the discount authority.
+No recommendation mutation or private evidence/registry endpoint is introduced.
+
 An uncertain create/update retains the original UUID and freezes the editor. **Check saved
 request** performs only `promotions.get` with
 `{ request: { operation: "create" | "update", idempotencyKey } }`. Missing, expired or
@@ -45,14 +75,18 @@ Manual-run controls remain separate and require approval by a different person.
 
 ### C01 restricted draft authoring (`wknd.promotion-drafts/v2`)
 
-The additive draft service in `lib/promotion-drafts.js` stores metadata in
-`promotion_drafts_v2`, **not** `promotions`. It does not call the audience resolver,
-evaluation engine, promotion effects, email or recovery runtime. Frozen `wknd.promotions/v1`
-remains null-only for audience restrictions. Draft IDs use `pdr_`, not live `prm_` IDs.
-There is no enable/apply operation or automatic promotion of a draft into the live engine.
-All results report `financialAuthorization: false`,
-`availability: { status: "unavailable", reason: "FINANCIAL_AUTHORITY_NOT_PRESENT" }`, and
-`activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
+Draft CRUD in `lib/promotion-drafts.js` remains separate metadata storage in
+`promotion_drafts_v2` (`pdr_` IDs). It never grants membership or enables through ordinary
+create/update. The additive **IMS-only demo activation** operation creates a disabled live
+`prm_` promotion then explicitly enables it through the existing revision/idempotency/audit
+service. Canonical `{ environment, key, version }` restrictions are preserved in live
+definitions and DTOs, and only a server-approved demo route may enable them.
+No real authoritative AAM membership provider is verified; `financialAuthorization: false`
+and unavailable **real-AAM financial** availability remain honest. Unconfigured capability
+still returns `activation: { blocked: true, reason: "PROVIDER_NOT_VERIFIED" }`.
+Configured admin capability returns `blocked: false`, `mode: "target-backed-demo"`,
+`evidence: false`, `financialAuthorization: false`. The sample below describes disabled,
+unconfigured authoring, not an activated demo offer.
 
 Exact draft DTO:
 
@@ -101,6 +135,7 @@ are copied. `enabled: true` returns `RESTRICTED_ACTIVATION_BLOCKED` before stora
 | `promotions.drafts.list` | `list_audience_promotion_drafts` | `{ limit?, after? }` |
 | `promotions.drafts.update` | `update_audience_promotion_draft` | `{ id, expectedRevision, promotion }` |
 | `promotions.drafts.delete` | `delete_audience_promotion_draft` | `{ id, expectedRevision }` |
+| `promotions.drafts.activate` | Not exposed to MCP integrations | `{ id, expectedRevision, idempotencyKey, confirmation: "Activate Target-backed DEMO offer" }` |
 
 Existing IMS/integration authentication is unchanged. Drafts are organisation- and environment-scoped; actor
 audit metadata stays private. Draft CRUD is separate from the MCP financial-promotion write gate,
@@ -119,7 +154,23 @@ Database failures propagate to the existing transport's logged error path, never
 The existing **Audience promotion drafts** picker loads its environment and applicable audiences from
 the authenticated server catalogue and fails closed while unavailable. It validates/saves/opens/updates/deletes
 through this same service. It edits name, canonical audience, discount and cap while preserving other
-terms from opened drafts. The legacy live Promotions editor and engine are unchanged.
+terms from opened drafts. The existing normalized single-promotion evaluator remains the
+authority for newly activated demo offers.
+The real promotions action separates non-raw Runtime's merged final server inputs and
+`__ow_*`/`__ims_*` transport/credential metadata from operation DTOs before dispatch.
+These fields never enter strict draft validation, persistence or response errors. Raw bodies
+are decoded independently and retain strict unknown-client-field rejection; ordinary unknown
+client keys in merged requests remain rejected too. Authentication and store configuration
+continue to receive the original server inputs. This fixes the live draft-list/CRUD error
+reporting Runtime input names as “Unrecognized keys”; it is separate from bundle quote expiry.
+When server capability is available, the picker requires confirmation of the **saved**
+revision before demo activation. It never trusts frontend configuration flags. Activation
+reserves/fixes the draft terms using compare-and-swap, uses separate durable create/update
+receipts, and records the resulting live promotion ID; replay cannot create another enabled
+offer. Activated drafts cannot be edited/deleted: manage or disable the live promotion in
+Promotions. Uncertain outcomes remain locked and retain the request key (also available on
+an authenticated draft read). Proven no-commit failures release the draft at a new revision
+for correction; an unsuccessful enable can leave a disabled live proposal, never a grant.
 
 Run `npm run preview:promotion-authoring` and open `http://127.0.0.1:4178` for a
 **local memory demonstration** of the same service. Saved metadata survives requests, but clears
@@ -153,7 +204,37 @@ Both retain DPID `1547309`, merge rule `1547344`, `status: "configured-reference
 authorization, or a new audience definition. Production read-only preview requires
 `environment: "production"` and reports the same explicit unavailable/blocked financial state as
 disabled-draft validation. Stage retains its original fixture envelope and two draft references.
-Neither contract permits enable/apply, restricted live-v1 promotions, or bypassing the provider trust gates.
+Those reference-only preview contracts still cannot enable/apply. The separate authenticated
+admin activation capability now permits **demo** restricted live promotions only when the
+existing server Target route is configured for the trusted namespace. Production uses
+`28538-wkndcommerce`, approved Production Target configuration and
+`wknd-aam-production-eligibility-v1`; Stage uses its existing explicit Stage gate.
+The existing provider checks authenticated shopper, current authoritative `idLinkage`
+consent/grant, server-bound alias, purpose/lease freshness and canonical Target response marker.
+Missing consent/binding, unknown/control/nonmatching markers, provider errors, wrong environments
+and unauthenticated/wrong-owner carts receive no restricted discount. Browser segment claims
+and Target markers are never elevated to verified AAM financial membership.
+Enabled restricted definitions require private IMS demo approval matching the canonical
+restriction; integration callers cannot remove a restriction to bypass eligibility.
+Cart labels and the live admin list explicitly say **Target-backed DEMO**; private approval,
+bindings and registry evidence never enter the public bundle DTO.
+This restricted-draft capability is separate from the built-in general planner benefit's
+existing `WKND_STAGE_PLANNER_RELEASE` / `productionDemoEnabled` opt-in. An ordinary Production
+build without that lexical release remains planner-`UNAVAILABLE`, even with configured
+restricted-demo capability. Publishing this source does not activate the general planner,
+recovery policy, or any disabled draft; alias approval alone authorizes none of them.
+
+Publication prerequisites: release updated storefront and secured promotions implementation,
+publish the admin UI, regenerate `schema/storefront.graphql`/bundled SDL and update the API Mesh
+static schema. Preserve the authenticated admin sequence and existing package settings.
+Reuse approved Production Target parameters (including `TARGET_DIAG_TARGET_CONFIG_APPROVED`)
+and binding/consent store capability; missing configuration remains blocked. The secured admin
+implementation now declares the same Target/Auth0 input bindings as storefront in
+`src/commerce-runtime.yaml`; those existing approved values must be supplied there as well,
+not just to storefront/diagnostic. Selective exec publication must preserve/forward those
+parameters without replacing the authenticated action sequence. No new OAuth
+exchange/provider-generation gate, production audience creation, customer/consent write or
+automatic promotion activation is required or performed by this source change.
 
 The Production bundler previously optimized the JSON array registry to `module.exports = []`.
 The narrow `asset/source` rule and shared JSON decoder preserve the full registry; Node fixture tests

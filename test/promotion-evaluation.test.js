@@ -152,6 +152,15 @@ describe('wknd.promotions/v1 golden evaluation', () => {
     expect(r.error.code).toBe('COUPON_ELIGIBILITY_UNAVAILABLE');
   });
 
+  test('restricted automatic and coupon definitions are denied without a server trust decision', () => {
+    const restriction = { environment: 'production', key: 'climbing-interest', version: 1 };
+    const lines = [lineOf({ id: 'L1', sku: 'GEAR-TEE-M', saleGrossMinor: 10000 })];
+    const p = { ...DEFS.P10, audienceRestriction: restriction };
+    expect(evaluatePromotions({ promotions: [p], lines, explicitCode: 'TEN10', nowMs: NOW }).error.code)
+      .toBe('COUPON_ELIGIBILITY_UNAVAILABLE');
+    expect(evaluatePromotions({ promotions: [{ ...p, mode: 'automatic', code: null }], lines, nowMs: NOW }).discountMinor).toBe(0);
+  });
+
   test('protected recovery cap is enforced even if the stored definition is corrupted', () => {
     const r = evaluatePromotions({
       promotions: [{ ...DEFS.R10, maxDiscountMinor: null, discount: { kind: 'percentage', basisPoints: 5000 } }],

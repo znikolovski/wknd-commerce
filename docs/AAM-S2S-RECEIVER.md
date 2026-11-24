@@ -43,8 +43,8 @@ Messages exceeding these limits fail explicitly; the destination's selected form
 Coordinator readback of global **format 285**, "Default HTTP Realtime with UserDPID":
 POST / JSON, no format headers, `User_DPID=<DPID>`, `Client_ID=<PID_ALIAS>`,
 `AAM_Destination_Id=<ORDER_ID>`, decimal-string counts, `dpUuid`, active `seg.traitAlias` and
-explicit `removedSegments` with Status 0, and **no AAM_Regions**. This is a candidate format,
-not proof of a saved destination or proof that `dpUuid` exports the person alias.
+explicit `removedSegments` with Status 0, and **no AAM_Regions**. It is configured on saved
+destination120278, not proof that `dpUuid` exports the person alias.
 Do not edit this shared format.
 
 Adobe requires **HTTP 200 within 3000ms**, with only **one retry**, and publishes no throughput
@@ -153,15 +153,16 @@ Before activation confirm:
 
 | Actual destination/server field | Receiver setting / requirement |
 | --- | --- |
-| Dedicated name | Proposed `WKND Commerce + Brevo Production AAM Receiver` |
+| Saved destination name / ID | `WKND Production AAM Destination` / `120278` (partner8455, S2S) |
 | Domain / port / URL prefix | `28538-wkndcommerce.adobeioruntime.net` / **443 HTTPS** / `/api/v1/web/aam/receiver`; verify UI actually constructs HTTPS, not HTTP |
 | MaxUsers | <=10; signed total count must agree |
 | Authentication | None **only for HTTP auth**; SHA256 HMAC remains mandatory |
 | HTTP signature header / algorithm / key | `x-aam-signature` / SHA256 / securely injected same private key |
 | Realtime server / format | Dedicated server5030 + confirmed format285; do not change the shared format |
-| Target Data Source | Required: source1547309 / integration code `wkndCustomerId`; the Admin list includes only Outbound-enabled sources |
+| Target Data Source / master source | Saved `1547309` / `1547309`, integration code `wkndCustomerId`; source is now inboundS2S=true and outboundS2S=true |
 | Foreign Client ID / PID_ALIAS | Coordinator-selected `wknd-commerce-brevo-production`; must match `WKND_AAM_CLIENT_ID` |
-| Destination ORDER_ID | Actual saved ID -> `WKND_AAM_DESTINATION_ID`; never invent one |
+| Destination ORDER_ID | Saved `120278` -> `WKND_AAM_DESTINATION_ID` |
+| Saved destination labels | `ONSITE_PERSONALIZATION`, `PII`; preserve these and source export controls, not proof of permitted alias export |
 | User DPID and actual dpUuid | `1547309` candidate only; prove export is the existing exact `wpa_...` alias |
 | Segment mapping aliases | Confirm actual exported `seg.traitAlias`; retain existing source IDs; numeric exact `WKND_AAM_SEGMENT_ALLOWLIST` |
 | Environment | `production`, exact Runtime namespace `28538-wkndcommerce` |
@@ -173,10 +174,9 @@ The actual Admin creation form requires a Target Data Source and at least one de
 For this setup, select **realtime**, leave **batch OFF**, and save the new destination with
 **no segments mapped**. Selecting a required delivery mode is not receiver or consumer activation.
 
-If source1547309 is absent from Target Data Source, its current `outboundS2S:false` excludes it
-from the Admin's `outboundOnly:true` query. In the normal Data Sources editor, enable **only
-Outbound** on that existing source, preserving inbound S2S, ID/integration code, sharing=false,
-and the `ONSITE_AD_TARGETING` / `OFFSITE_AD_TARGETING` restrictions and all remaining settings.
+Source1547309 was previously excluded from the Admin's `outboundOnly:true` query. Its saved
+settings now have inbound and Outbound S2S enabled, sharing=false, and the
+`ONSITE_AD_TARGETING` / `OFFSITE_AD_TARGETING` restrictions preserved. Do not change remaining settings.
 Do not substitute another source or relax its export controls. Outbound eligibility and a stale
 raw-sub description do not prove that format285 exports the required server person alias.
 
@@ -188,6 +188,25 @@ automatically. A disabled endpoint may be published solely for setup; it returns
 performs no DB/provider calls. A saved realtime-selected, unmapped destination is not live
 qualification. Confirm actual destination ID, permitted export and exact `DataPartner_UUID`
 alias mapping before mapping any audiences or enabling receiver/consumer gates.
+
+### Smallest controlled export validation
+
+The disabled receiver now has destination120278/client/DPID scope and the same private signing
+key bound. This is setup only. Live diagnostic0.0.5 has the existing person receipt transport
+but not this PR's registration initializer; live storefront0.0.26 does not expose the shared
+membership field. Neither existing action was changed for destination setup.
+
+With separate approval for one controlled test, use one existing already-qualified shopper
+with an existing explicit idLinkage grant and a fresh authenticated `person-status` receipt
+(no alias mint or grant creation). Confirm one existing segment's actual export alias, scope
+the intake allowlist/TTL to that test, and map only that segment to destination120278 while
+enabling **intake only**. Receive one genuine signed transfer and compare its normalized
+identityKey with SHA256(JSON.stringify([scopeKey, receipt.personAlias])); never print the raw
+alias/payload. Keep the worker, identity verification, Commerce/Brevo consumers OFF. Restore
+intake OFF and remove the controlled mapping after capture. Matching the current receipt
+proves that export's identity, not membership-provider or consumer activation.
+This test does not require publishing the registration initializer first; that separately
+gated source publication is needed later for persistent consumer identity resolution.
 
 Canonical engagement rules/trait alignment remain separate: this receiver ingests actual
 destination observations; it does not invent quiz/navigation/kit events or change existing IDs.

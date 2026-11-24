@@ -160,6 +160,7 @@ export default function Promotions () {
                 <Flex gap='size-100' alignItems='center'>
                   <Text>{p.name}</Text>
                   {p.managementClass === 'protected-recovery' && <Badge variant='info'>Protected</Badge>}
+                  {p.audienceRestriction && <Badge variant='info'>Target-backed DEMO · evidence false</Badge>}
                 </Flex>
               </Cell>
               <Cell>{p.mode === 'coupon' ? `Coupon ${p.code}` : 'Automatic'}</Cell>

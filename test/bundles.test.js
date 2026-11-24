@@ -2,10 +2,13 @@ const crypto = require('node:crypto');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const { loadCatalog, resetCatalogCache } = require('../lib/catalog');
-const { bundleOpportunities, bundleId } = require('../lib/bundles');
-const { createPromotionService, migrateLegacyPromotions } = require('../lib/promotions');
+const { bundleOpportunities, bundleId, QUOTE_MS } = require('../lib/bundles');
+const { createPromotionService, migrateLegacyPromotions, loadPromotionRuntime } = require('../lib/promotions');
 const { createPromotionsAdmin } = require('../lib/promotions-admin');
 const { evaluatePromotions } = require('../lib/promotion-evaluation');
+const { createCart, computeTotals } = require('../lib/cart');
+const { bundleOffers } = require('../lib/bundle-offers');
+const { runGraphQL } = require('../lib/graphql-server');
 const CATALOG = require('../data/catalog.json');
 
 const NOW = Date.parse('2026-11-23T00:00:00.000Z');
@@ -101,6 +104,148 @@ test('bundle proposals start disabled and only individual IMS approval can activ
     id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
     promotion: { ...definition(), enabled: true },
   })).toMatchObject({ ok: false, committed: false, error: { code: 'VALIDATION_ERROR' } });
+});
+
+test('enabled approval survives the proposal quote expiry by re-quoting fresh catalog facts, without changing stored approval or weakening stock/date checks', async () => {
+  const promotion = {
+    ...definition(), discount: { kind: 'percentage', basisPoints: 5000 },
+    endsAt: new Date(NOW + 86400000).toISOString(),
+  };
+  const created = await service.createPromotion(ctx(), { idempotencyKey: crypto.randomUUID(), promotion });
+  const enabled = await service.updatePromotion(ctx(), {
+    id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+    promotion: { ...promotion, enabled: true },
+  });
+  const expiredAt = NOW + QUOTE_MS + 1000;
+  // Reproduces the original defect: evaluating the stored proposal directly loses the discount.
+  expect(evaluatePromotions({
+    promotions: [enabled.promotion], lines: opportunity.components.map(lineOf), nowMs: expiredAt,
+  }).discountMinor).toBe(0);
+  const cart = await createCart(store);
+  await store.collection('carts').updateOne({ id: cart.id }, { $set: {
+    items: opportunity.components.map((c, i) => ({
+      uid: `L${i}`, sku: c.sku, quantity: c.quantity,
+      parentSku: (cat.byVariantSku.get(c.sku)?.parent || cat.bySku.get(c.sku)).sku,
+    })),
+  } });
+  const time = jest.spyOn(Date, 'now').mockReturnValue(expiredAt);
+  try {
+    const query = 'query($id:String!){cart(cart_id:$id){prices{discounts{label amount{value}}}}wkndBundleOffers(cart_id:$id){quote_expires_at}}';
+    const read = () => runGraphQL({ query, variables: { id: cart.id } }, { store });
+    expect((await read()).body.data.cart.prices.discounts[0].label).toBe(promotion.name);
+    const saved = await store.collection('carts').findOne({ id: cart.id });
+    const runtime = await loadPromotionRuntime(store, { cart: saved, clock: () => expiredAt });
+    const selected = runtime.definitions.find((p) => p.id === enabled.promotion.id);
+    expect(Date.parse(selected.target.quoteExpiresAt)).toBe(expiredAt + QUOTE_MS);
+    expect((await store.collection('promotions').findOne({ id: selected.id })).target.quoteExpiresAt).toBe(opportunity.quoteExpiresAt);
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: { items: saved.items.slice(0, 1) } });
+    expect((await read()).body.data.wkndBundleOffers[0].quote_expires_at).toBe(new Date(expiredAt + QUOTE_MS).toISOString());
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: { items: saved.items } });
+    const component = opportunity.components[0];
+    const price = cat.priceBySku.get(component.sku);
+    await store.collection('prices').updateOne({ sku: component.sku }, { $set: { regular: price.regular + 10, special: null } });
+    const repriced = await loadPromotionRuntime(store, { cart: saved, clock: () => expiredAt });
+    expect(repriced.definitions.find((p) => p.id === selected.id).enabled).toBe(false);
+    expect(computeTotals(repriced.catalogSnapshot, saved, repriced).discountTotal).toBe(0);
+    expect((await read()).body.data.cart.prices.discounts).toEqual([]);
+    await store.collection('prices').updateOne({ sku: component.sku }, { $set: price });
+    await store.collection('inventory').updateOne({ sku: component.sku }, { $set: { qty: component.quantity + promotion.target.safetyBuffer - 1 } });
+    expect((await read()).body.data.cart.prices.discounts).toEqual([]);
+    await store.collection('inventory').updateOne({ sku: component.sku }, { $set: { qty: 100 } });
+    time.mockReturnValue(NOW + 86400001);
+    expect((await read()).body.data.cart.prices.discounts).toEqual([]);
+  } finally {
+    time.mockRestore();
+  }
+});
+
+test('partial suggestions suppress full/no-overlap kits, invalid fresh facts, denied audiences, date/minimum failures and a better competing promotion', () => {
+  const p = { ...definition(), id: 'approved', enabled: true };
+  const component = opportunity.components[0];
+  const parent = cat.byVariantSku.get(component.sku)?.parent || cat.bySku.get(component.sku);
+  const cart = { items: [{ uid: 'A', sku: component.sku, parentSku: parent.sku, quantity: component.quantity }], coupons: [] };
+  const runtime = { definitions: [p], nowMs: NOW, trust: () => ({ ok: true }), selection: 'best-saving' };
+  expect(bundleOffers(cat, cart, runtime)).toHaveLength(1);
+  expect(bundleOffers(cat, { items: [], coupons: [] }, runtime)).toEqual([]);
+  for (const patch of [
+    { enabled: false }, { startsAt: new Date(NOW + 1).toISOString() },
+    { endsAt: new Date(NOW - 1).toISOString() }, { minimumMerchandiseMinor: 100000000 },
+    { target: { ...p.target, quoteExpiresAt: new Date(NOW).toISOString() } },
+    { target: { ...p.target, components: p.target.components.map((c) => ({ ...c, unitPriceMinor: c.unitPriceMinor + 1 })) } },
+  ]) {
+    expect(bundleOffers(cat, cart, { ...runtime, definitions: [{ ...p, ...patch }] })).toEqual([]);
+  }
+  expect(bundleOffers(cat, cart, { ...runtime, trust: () => ({ ok: false }) })).toEqual([]);
+  const better = { ...p, id: 'better', target: { kind: 'all' }, discount: { kind: 'percentage', basisPoints: 5000 } };
+  expect(bundleOffers(cat, cart, { ...runtime, definitions: [p, better] })).toEqual([]);
+  const coupon = { ...better, mode: 'coupon', code: 'BETTER' };
+  expect(bundleOffers(cat, { ...cart, coupons: ['BETTER'] }, { ...runtime, definitions: [p, coupon] })).toEqual([]);
+});
+
+test('GraphQL partial kit uses exact variant SKU/quantity-only additions and automatically discounts one complete kit without leaking private evidence', async () => {
+  const time = jest.spyOn(Date, 'now').mockReturnValue(NOW);
+  try {
+    const configurable = cat.products.find((p) => p.type === 'configurable');
+    const simple = cat.products.find((p) => p.type === 'simple');
+    const component = (sku, quantity) => ({
+      sku, quantity, unitPriceMinor: Math.round(cat.priceBySku.get(sku).regular * 100),
+    });
+    const components = [component(configurable.variants[0].sku, 3), component(simple.sku, 2)];
+    const promotion = {
+      ...definition(), name: 'Approved exact variant completion',
+      discount: { kind: 'percentage', basisPoints: 5000 },
+      target: { ...targetOf(opportunity), bundleId: bundleId(components), components },
+    };
+    const created = await service.createPromotion(ctx(), { idempotencyKey: crypto.randomUUID(), promotion });
+    expect(created.ok).toBe(true);
+    const enabled = await service.updatePromotion(ctx(), {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+      promotion: { ...promotion, enabled: true },
+    });
+    expect(enabled.ok).toBe(true);
+    const cart = await createCart(store, { customerSub: 'auth0|kit-owner' });
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: {
+      items: [
+        { uid: 'A', sku: components[0].sku, parentSku: configurable.sku, quantity: 1 },
+        { uid: 'B', sku: components[0].sku, parentSku: configurable.sku, quantity: 1 },
+      ],
+    } });
+    const query = `query($id:String!){wkndBundleOffers(cart_id:$id){
+      promotion_id bundle_id name quote_expires_at saving{value currency}
+      components{sku name required_quantity cart_quantity missing_quantity unit_price{value currency}}
+    }}`;
+    const deps = { store, params: {}, verify: async () => ({ sub: 'auth0|kit-owner' }) };
+    const read = () => runGraphQL({ query, variables: { id: cart.id }, headers: { authorization: 'Bearer offline' } }, deps);
+    const result = await read();
+    expect(result.body.errors).toBeUndefined();
+    expect(result.cacheable).toBe(false);
+    const [offer] = result.body.data.wkndBundleOffers;
+    expect(offer).toMatchObject({ promotion_id: enabled.promotion.id, saving: { currency: 'AUD' } });
+    expect(offer.components.find((c) => c.sku === components[0].sku)).toMatchObject({ cart_quantity: 2, missing_quantity: 1, required_quantity: 3 });
+    expect(JSON.stringify(offer)).not.toMatch(/private|lastResolved|affected|evidence|orgId/);
+    expect((await store.collection('carts').findOne({ id: cart.id })).revision).toBeUndefined();
+    const added = await runGraphQL({
+      query: `mutation($id:String!,$items:[CartItemInput!]!){
+        addProductsToCart(cartId:$id,cartItems:$items){user_errors{code message}
+        cart{prices{discounts{label amount{value currency}}}}}}`,
+      variables: { id: cart.id, items: offer.components.filter((c) => c.missing_quantity > 0)
+        .map((c) => ({ sku: c.sku, quantity: c.missing_quantity })) },
+      headers: { authorization: 'Bearer offline' },
+    }, deps);
+    expect(added.body.errors).toBeUndefined();
+    expect(added.body.data.addProductsToCart.user_errors).toEqual([]);
+    expect(added.body.data.addProductsToCart.cart.prices.discounts).toEqual([{
+      label: promotion.name, amount: offer.saving,
+    }]);
+    const saved = await store.collection('carts').findOne({ id: cart.id });
+    expect(saved.items.filter((i) => i.sku === components[0].sku).reduce((n, i) => n + i.quantity, 0)).toBe(3);
+    expect(saved.items.find((i) => i.sku === components[1].sku).quantity).toBe(2);
+    expect((await read()).body.data.wkndBundleOffers).toEqual([]);
+    const denied = await runGraphQL({ query, variables: { id: cart.id } }, { store });
+    expect(denied.body.errors[0].extensions.category).toBe('graphql-authorization');
+  } finally {
+    time.mockRestore();
+  }
 });
 
 test('all exact components required; only one kit quantity discounted, not excess or unrelated merchandise', () => {

@@ -1,0 +1,23 @@
+type WkndBundleOfferComponent {
+  sku: String!
+  name: String!
+  required_quantity: Int!
+  cart_quantity: Int!
+  missing_quantity: Int!
+  unit_price: Money!
+}
+
+type WkndBundleOffer {
+  promotion_id: String!
+  bundle_id: String!
+  name: String!
+  quote_expires_at: String!
+  saving: Money!
+  components: [WkndBundleOfferComponent!]!
+}
+
+extend type Query {
+  """Approved partial kits that win the projected completed cart's single-promotion evaluation.
+  Display only: adding remaining exact SKUs re-evaluates current price, stock and eligibility."""
+  wkndBundleOffers(cart_id: String!): [WkndBundleOffer!]!
+}

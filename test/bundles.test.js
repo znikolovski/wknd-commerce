@@ -7,6 +7,7 @@ const { createPromotionService, migrateLegacyPromotions, loadPromotionRuntime } 
 const { createPromotionsAdmin } = require('../lib/promotions-admin');
 const { evaluatePromotions } = require('../lib/promotion-evaluation');
 const { createCart, computeTotals } = require('../lib/cart');
+const cartLib = require('../lib/cart');
 const { bundleOffers } = require('../lib/bundle-offers');
 const { runGraphQL } = require('../lib/graphql-server');
 const CATALOG = require('../data/catalog.json');
@@ -45,6 +46,138 @@ const lineOf = (c, i) => ({
 });
 const evaluate = (lines, extra = {}) => evaluatePromotions({
   nowMs: NOW, promotions: [{ ...definition(), id: 'bundle', enabled: true }], lines, ...extra,
+});
+
+describe('reviewed atomic bundle completion', () => {
+  const selection = 'wknd_cart_version total_quantity prices{grand_total{value currency} discounts{label amount{value currency}}}';
+  const complete = `mutation($id:String!,$promotion:String!,$bundle:String!,$version:String!){
+    addProductsToCart:completeWkndBundle(cart_id:$id,promotion_id:$promotion,bundle_id:$bundle,expected_cart_version:$version){
+      cart{${selection}} user_errors{code message}
+    }
+    shipping:estimateShippingMethods(input:{cart_id:$id,address:{country_code:AU}}){method_code}
+    estimated:estimateTotals(input:{cart_id:$id,address:{country_code:AU}}){cart{${selection}}}
+  }`;
+  let variables;
+  let components;
+  let time;
+  const execute = () => runGraphQL({ query: complete, variables }, { store });
+
+  beforeEach(async () => {
+    time = jest.spyOn(Date, 'now').mockReturnValue(NOW);
+    components = opportunity.components.map((c, i) => ({ sku: c.sku, quantity: i === 0 ? 2 : c.quantity, unitPriceMinor: c.unitPriceMinor }));
+    const promotion = {
+      ...definition(), name: 'Atomic approved kit', discount: { kind: 'percentage', basisPoints: 5000 },
+      target: { ...targetOf(opportunity), bundleId: bundleId(components), components },
+    };
+    const created = await service.createPromotion(ctx(), { idempotencyKey: crypto.randomUUID(), promotion });
+    if (!created.ok) throw new Error('Atomic kit fixture creation failed.');
+    const enabled = await service.updatePromotion(ctx(), {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+      promotion: { ...promotion, enabled: true },
+    });
+    if (!enabled.ok) throw new Error('Atomic kit fixture approval failed.');
+    const cart = await createCart(store);
+    const first = components[0];
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: { items: [{
+      uid: 'existing', sku: first.sku, quantity: 1,
+      parentSku: (cat.byVariantSku.get(first.sku)?.parent || cat.bySku.get(first.sku)).sku,
+    }] } });
+    const read = await runGraphQL({
+      query: 'query($id:String!){wkndBundleOffers(cart_id:$id){promotion_id bundle_id cart_version}}',
+      variables: { id: cart.id },
+    }, { store });
+    if (read.body.errors?.length) throw new Error('Atomic kit fixture offer read failed.');
+    const [offer] = read.body.data.wkndBundleOffers;
+    variables = { id: cart.id, promotion: offer.promotion_id, bundle: offer.bundle_id, version: offer.cart_version };
+  });
+
+  afterEach(() => time.mockRestore());
+
+  test('derives every missing quantity and commits once alongside fresh ordered quotes; replay fails', async () => {
+    expect(variables.version).toBe('v0');
+    const writes = jest.spyOn(store.collection('carts'), 'replaceOne');
+    const result = await execute();
+    expect(result.body.errors).toBeUndefined();
+    expect(result.cacheable).toBe(false);
+    expect(writes).toHaveBeenCalledTimes(1);
+    const mutation = result.body.data.addProductsToCart;
+    expect(mutation.user_errors).toEqual([]);
+    expect(mutation.cart.wknd_cart_version).toBe('v1');
+    expect(mutation.cart.prices.discounts[0].label).toBe('Atomic approved kit');
+    expect(result.body.data.estimated.cart).toMatchObject({
+      wknd_cart_version: 'v1', total_quantity: components.reduce((sum, c) => sum + c.quantity, 0),
+    });
+    const saved = await store.collection('carts').findOne({ id: variables.id });
+    components.forEach((c) => expect(saved.items.filter((item) => item.sku === c.sku)
+      .reduce((sum, item) => sum + item.quantity, 0)).toBe(c.quantity));
+    const replay = await execute();
+    expect(replay.body.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(writes).toHaveBeenCalledTimes(1);
+    expect(await store.collection('carts').findOne({ id: variables.id })).toEqual(saved);
+  });
+
+  test.each(['stale', 'disabled', 'expired', 'wrong-promotion', 'wrong-bundle', 'price', 'missing', 'stock', 'owner', 'inactive'])(
+    '%s fails explicitly without a cart write', async (kind) => {
+      if (kind === 'stale') variables.version = 'v999';
+      if (kind === 'disabled') await store.collection('promotions').updateOne({ id: variables.promotion }, { $set: { enabled: false } });
+      if (kind === 'expired') await store.collection('promotions').updateOne({ id: variables.promotion }, { $set: { endsAt: new Date(NOW - 1).toISOString() } });
+      if (kind === 'wrong-promotion') variables.promotion = 'unavailable';
+      if (kind === 'wrong-bundle') variables.bundle = 'unavailable';
+      if (kind === 'price') await store.collection('prices').updateOne({ sku: components[1].sku }, { $set: { regular: 999, special: null } });
+      if (kind === 'missing') await store.collection('prices').deleteMany({ sku: components[1].sku });
+      if (kind === 'stock') await store.collection('inventory').updateOne({ sku: components[1].sku }, { $set: { qty: 0 } });
+      if (kind === 'owner') await store.collection('carts').updateOne({ id: variables.id }, { $set: { customerSub: 'another-owner' } });
+      if (kind === 'inactive') await store.collection('carts').updateOne({ id: variables.id }, { $set: { status: 'ordered' } });
+      const before = await store.collection('carts').findOne({ id: variables.id });
+      const writes = jest.spyOn(store.collection('carts'), 'replaceOne');
+      const result = await execute();
+      expect(result.body.errors.length).toBeGreaterThan(0);
+      expect(result.body.data.addProductsToCart).toBeNull();
+      expect(writes).not.toHaveBeenCalled();
+      expect(await store.collection('carts').findOne({ id: variables.id })).toEqual(before);
+    },
+  );
+
+  test('a later component validation failure cannot persist an earlier staged addition', async () => {
+    const before = await store.collection('carts').findOne({ id: variables.id });
+    const original = cartLib.addItem;
+    const add = jest.spyOn(cartLib, 'addItem').mockImplementationOnce(original)
+      .mockReturnValueOnce({ error: { code: 'INSUFFICIENT_STOCK', message: 'Stock changed.' } });
+    const writes = jest.spyOn(store.collection('carts'), 'replaceOne');
+    const result = await execute();
+    expect(add).toHaveBeenCalledTimes(2);
+    expect(result.body.errors[0].extensions.code).toBe('INSUFFICIENT_STOCK');
+    expect(writes).not.toHaveBeenCalled();
+    expect(await store.collection('carts').findOne({ id: variables.id })).toEqual(before);
+  });
+
+  test('a later quote failure preserves the committed completion result', async () => {
+    const result = await runGraphQL({
+      query: complete.replaceAll('cart_id:$id,address:', 'cart_id:"missing-estimate",address:'), variables,
+    }, { store });
+    expect(result.body.data.addProductsToCart).toMatchObject({
+      user_errors: [], cart: { wknd_cart_version: 'v1' },
+    });
+    expect(result.body.data.shipping).toBeNull();
+    expect(result.body.data.estimated.cart).toBeNull();
+    expect(result.body.errors.map((error) => error.path.join('.'))).toEqual(expect.arrayContaining(['shipping', 'estimated.cart']));
+    expect((await store.collection('carts').findOne({ id: variables.id })).revision).toBe(1);
+  });
+
+  test('a concurrent cart change rejects without rebasing or overwriting its coupon', async () => {
+    const carts = store.collection('carts');
+    const before = await carts.findOne({ id: variables.id });
+    const replace = carts.replaceOne.bind(carts);
+    const writes = jest.spyOn(carts, 'replaceOne').mockImplementationOnce(async (filter, next) => {
+      await carts.updateOne({ id: variables.id }, { $set: { revision: 1, coupons: ['WKND10'] } });
+      return replace(filter, next);
+    });
+    const result = await execute();
+    expect(result.body.errors[0].extensions.code).toBe('CART_CHANGED');
+    expect(writes).toHaveBeenCalledTimes(1);
+    const saved = await carts.findOne({ id: variables.id });
+    expect(saved).toMatchObject({ revision: 1, coupons: ['WKND10'], items: before.items });
+  });
 });
 
 test('bounded dated unit demand/co-purchase is aggregate-only, excludes malformed/non-AUD/out-of-window records and reports truncation', async () => {
@@ -104,6 +237,92 @@ test('bundle proposals start disabled and only individual IMS approval can activ
     id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
     promotion: { ...definition(), enabled: true },
   })).toMatchObject({ ok: false, committed: false, error: { code: 'VALIDATION_ERROR' } });
+});
+
+describe('request-owned financial and definition reads', () => {
+  async function enabledCart(components) {
+    const created = await service.createPromotion(ctx(), { idempotencyKey: crypto.randomUUID(), promotion: definition() });
+    expect(await service.updatePromotion(ctx(), {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+      promotion: { ...definition(), enabled: true },
+    })).toMatchObject({ ok: true });
+    const cart = await createCart(store);
+    const items = components.map((c, i) => ({
+      uid: `L${i}`, sku: c.sku, quantity: c.quantity,
+      parentSku: (cat.byVariantSku.get(c.sku)?.parent || cat.bySku.get(c.sku)).sku,
+    }));
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: { items } });
+    return { ...cart, items };
+  }
+
+  test('quantity updates read the entire bundle scope before CAS and a new request observes changed prices', async () => {
+    const cart = await enabledCart(opportunity.components.slice(0, 1));
+    let phase = 'before-cas';
+    const reads = [];
+    for (const name of ['products', 'prices', 'inventory']) {
+      const collection = store.collection(name);
+      for (const method of ['findOne', 'find', 'countDocuments']) {
+        const original = collection[method].bind(collection);
+        jest.spyOn(collection, method).mockImplementation((...args) => {
+          reads.push({ name, phase });
+          return original(...args);
+        });
+      }
+    }
+    const carts = store.collection('carts');
+    const replace = carts.replaceOne.bind(carts);
+    jest.spyOn(carts, 'replaceOne').mockImplementation(async (...args) => {
+      const saved = await replace(...args);
+      phase = 'after-cas';
+      return saved;
+    });
+    const mutation = `mutation($id:String!,$uid:ID!){
+      updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){
+        cart{prices{grand_total{value}}} errors{code}
+      }
+    }`;
+    const first = await runGraphQL({ query: mutation, variables: { id: cart.id, uid: cart.items[0].uid } }, { store });
+    expect(first.body.errors).toBeUndefined();
+    expect(first.body.data.updateCartItems.errors).toEqual([]);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((read) => read.phase === 'before-cas')).toBe(true);
+    const price = cat.priceBySku.get(cart.items[0].sku);
+    await store.collection('prices').updateOne({ sku: cart.items[0].sku }, { $set: { regular: price.regular + 10, special: null } });
+    reads.length = 0;
+    phase = 'new-request';
+    const next = await runGraphQL({
+      query: 'query($id:String!){cart(cart_id:$id){prices{grand_total{value}}}}', variables: { id: cart.id },
+    }, { store });
+    expect(next.body.errors).toBeUndefined();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(next.body.data.cart.prices.grand_total.value).toBeGreaterThan(first.body.data.updateCartItems.cart.prices.grand_total.value);
+  });
+
+  test('serial mutation fields share source reads but recompute bundle eligibility for each new cart', async () => {
+    const cart = await enabledCart(opportunity.components);
+    const definitionsRead = jest.spyOn(store.collection('promotions'), 'find');
+    const query = `mutation($id:String!,$uid:ID!,$qty:Float!){
+      first:updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:$qty}]}){errors{code}}
+      complete:estimateTotals(input:{cart_id:$id,address:{country_code:AU},shipping_method:{carrier_code:"wknd",method_code:"standard"}}){
+        cart{prices{discounts{label amount{value}}}}
+      }
+      second:updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:0}]}){errors{code}}
+      partial:estimateTotals(input:{cart_id:$id,address:{country_code:AU},shipping_method:{carrier_code:"wknd",method_code:"standard"}}){
+        cart{prices{discounts{label amount{value}}}}
+      }
+    }`;
+    const result = await runGraphQL({
+      query, variables: { id: cart.id, uid: cart.items[0].uid, qty: cart.items[0].quantity },
+    }, { store });
+    expect(result.body.errors).toBeUndefined();
+    expect(result.body.data.first.errors).toEqual([]);
+    expect(result.body.data.second.errors).toEqual([]);
+    expect(result.body.data.complete.cart.prices.discounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: definition().name }),
+    ]));
+    expect(result.body.data.partial.cart.prices.discounts.some((discount) => discount.label === definition().name)).toBe(false);
+    expect(definitionsRead.mock.calls.filter(([filter]) => filter.mode === 'automatic')).toHaveLength(1);
+  });
 });
 
 test('enabled approval survives the proposal quote expiry by re-quoting fresh catalog facts, without changing stored approval or weakening stock/date checks', async () => {

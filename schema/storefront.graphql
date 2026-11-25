@@ -548,10 +548,21 @@ type Query {
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
 
   """
+  Existing current owned active cart's recovery status and matching snapshot. Read-only:
+  no cart is created or saved. Null means no existing active cart; authorization is required.
+  """
+  wkndCustomerRecoveryOffer: WkndCustomerRecoveryOffer
+
+  """
   Stage mock-Commerce planner benefit; automatic selection, no claim/apply mutation.
   """
   wkndPlannerOffer(cart_id: String!): WkndRecoveryOffer!
   of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
+
+  """
+  Read the owned confirmed demo booking's seven-day Adventure Essentials offer; no grant writes.
+  """
+  wkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
 
   """
   Approved partial kits that win the projected completed cart's single-promotion evaluation.
@@ -1866,6 +1877,17 @@ type Mutation {
   wording_version of the consent text the shopper saw. Not available to delegated agents.
   """
   setWkndMarketingEmailOptIn(opt_in: Boolean!, wording_version: String, source: WkndConsentSource = WEB): Boolean!
+
+  """
+  Claim the verified shopper's confirmed demo flight offer. Does not edit a cart or buy gear.
+  """
+  claimWkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
+
+  """
+  Complete one currently eligible partial kit against the exact displayed cart revision.
+  Missing quantities are derived and validated server-side before a single cart CAS; no partial success.
+  """
+  completeWkndBundle(cart_id: String!, promotion_id: String!, bundle_id: String!, expected_cart_version: String!): AddProductsToCartOutput
 }
 
 """Defines the comparison operators that can be used in a filter."""
@@ -22909,6 +22931,19 @@ input ViewHistoryInput {
   sku: String!
 }
 
+type WkndRecoveryCartItemSnapshot {
+  uid: ID!
+  quantity: Float!
+}
+
+type WkndCustomerRecoveryOffer {
+  cart_id: String!
+  cart_version: String!
+  items: [WkndRecoveryCartItemSnapshot!]!
+  applied_coupon_codes: [String!]!
+  offer: WkndRecoveryOffer!
+}
+
 enum WkndRecoveryOfferApplicationOutcome {
   APPLIED
   ALREADY_APPLIED
@@ -22992,8 +23027,27 @@ type WkndBundleOfferComponent {
 type WkndBundleOffer {
   promotion_id: String!
   bundle_id: String!
+  cart_version: String!
   name: String!
   quote_expires_at: String!
   saving: Money!
   components: [WkndBundleOfferComponent!]!
+}
+
+type WkndAeroBundleComponent {
+  sku: String!
+  quantity: Float!
+  name: String!
+}
+
+type WkndAeroBundleOffer {
+  status: String!
+  reason: String
+  booking_id: String!
+  promotion_id: String
+  bundle_id: String
+  name: String
+  percent_off: Float
+  expires_at: String
+  components: [WkndAeroBundleComponent!]!
 }

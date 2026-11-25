@@ -10,13 +10,47 @@ type WkndBundleOfferComponent {
 type WkndBundleOffer {
   promotion_id: String!
   bundle_id: String!
+  cart_version: String!
   name: String!
   quote_expires_at: String!
   saving: Money!
   components: [WkndBundleOfferComponent!]!
 }
 
+type WkndAeroBundleComponent {
+  sku: String!
+  quantity: Float!
+  name: String!
+}
+
+type WkndAeroBundleOffer {
+  status: String!
+  reason: String
+  booking_id: String!
+  promotion_id: String
+  bundle_id: String
+  name: String
+  percent_off: Float
+  expires_at: String
+  components: [WkndAeroBundleComponent!]!
+}
+
+extend type Mutation {
+  """Claim the verified shopper's confirmed demo flight offer. Does not edit a cart or buy gear."""
+  claimWkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
+  """Complete one currently eligible partial kit against the exact displayed cart revision.
+  Missing quantities are derived and validated server-side before a single cart CAS; no partial success."""
+  completeWkndBundle(
+    cart_id: String!
+    promotion_id: String!
+    bundle_id: String!
+    expected_cart_version: String!
+  ): AddProductsToCartOutput
+}
+
 extend type Query {
+  """Read the owned confirmed demo booking's seven-day Adventure Essentials offer; no grant writes."""
+  wkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
   """Approved partial kits that win the projected completed cart's single-promotion evaluation.
   Display only: adding remaining exact SKUs re-evaluates current price, stock and eligibility."""
   wkndBundleOffers(cart_id: String!): [WkndBundleOffer!]!

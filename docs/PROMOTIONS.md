@@ -35,6 +35,87 @@ preserved on full replacement; enabling requires the separate, explicit confirma
 the current revision. The server rechecks inventory, prices and quote expiry. Aero remains
 a separate demo booking; this UI does not reserve real seats or combine reservations.
 
+### Confirmed Aero flight: Adventure Essentials
+
+The separately gated `AERO_BUNDLE_ENABLED=true` policy offers 50% off **one complete kit**:
+one `WKND-HYD-002` Collapsible Bottle 1L, one `WKND-LGT-001` Alpine Start Headlamp 400,
+and one `WKND-TRV-009` Wilderness First Aid Kit. Extra quantities and other merchandise
+are not included. Gear is a separate Commerce purchase; claiming does not edit/create a
+cart, reserve stock, book a flight or place an order.
+
+On the existing storefront GraphQL endpoint, using existing verified shopper authentication:
+
+```graphql
+query {
+  wkndAeroBundleOffer(booking_id: "BK_0123456789abcdef") {
+    status reason booking_id promotion_id bundle_id name percent_off expires_at
+    components { sku quantity name }
+  }
+}
+mutation {
+  claimWkndAeroBundleOffer(booking_id: "BK_0123456789abcdef") {
+    status reason booking_id promotion_id bundle_id name percent_off expires_at
+    components { sku quantity name }
+  }
+}
+```
+
+Both operations return the same DTO. Status is `ELIGIBLE`, `CLAIMED`, `REDEEMED` or
+`INELIGIBLE`. Disabled policy returns `INELIGIBLE/OFFER_DISABLED`; missing, foreign,
+unconfirmed, non-demo or expired bookings return `INELIGIBLE/BOOKING_NOT_ELIGIBLE`.
+Configuration, upstream and malformed-response errors are explicit GraphQL errors, never
+successful eligibility. No browser flags, client identity, price, grant or component inputs
+are accepted. Current authentication is unchanged; clients must use its accepted issuer
+and audience, not assume a client ID alone grants access.
+
+Commerce verifies ownership through the existing fixed
+`https://wknd-aero-api.jaggah.workers.dev/api/bookings/<booking_id>` read. It signs the
+verified shopper's subject using the dedicated Commerce parameter `WKND_BOOKING_ASSERTION_SECRET`,
+HS256, issuer `urn:wknd-commerce:storefront`,
+audience `https://wknd-aero-api.jaggah.workers.dev`, configured Auth0 `identity_issuer`,
+`bookings:read` scope, unique `jti` and a 60-second lifetime, with
+`X-WKND-Delegation: commerce`. Aero verifies this isolated branch using its separate
+`WKND_COMMERCE_BOOKING_ASSERTION_SECRET`; the existing MCP secret/issuer/branch are unchanged.
+Both dedicated parameters must be provisioned from the same private secret artifact, never
+from opaque configuration retrieval or by rotating the MCP key.
+The origin cannot be supplied or overridden by a browser.
+The existing Aero ownership-keyed lookup must return the exact ID, `confirmed`, `demo: true`
+and a valid non-future `createdAt`. Any confirmed owned demo flight qualifies; no route,
+fare, adventure tag or passenger details determine eligibility.
+
+Claim is idempotent per verified issuer/subject/booking. Expiry is exactly seven days from
+authoritative booking creation, not claim time; retry cannot renew it. The shared server
+entitlement survives cart edits and is read by every client through the same Commerce
+financial runtime—there is no client-side grant replication. Each evaluation re-verifies
+the current booking and unused entitlement, reads current kit prices/stock, and selects the
+single best discount without stacking. A complete kit receives 50% of current AUD unit
+prices, not a stored browser quote. Existing cart ownership, active status, quote, CAS and
+stock checks still apply.
+
+Both order roots share a unique booking/shopper redemption reservation before stock
+reservation. A proven stock rejection releases it; an uncertain order insertion leaves it
+reserved to prevent double redemption. A durably inserted order consumes it, even if later
+bookkeeping fails. Claim does not consume redemption. `REDEEMED` also covers a pending
+reservation whose outcome must not be blindly retried.
+
+Production supplies the dedicated secret and `AERO_BUNDLE_ENABLED=true` as the only two
+binding-owned parameters on the private, same-namespace `commerce-aero` package binding to
+`commerce`. The public Mesh endpoint is unchanged; only its storefront source package path
+changes to `commerce-aero`, alongside the additive SDL. Original action/package defaults,
+annotations, sequences and unrelated Mesh configuration remain unchanged. Never replay
+encrypted Runtime GET parameter values into an update.
+
+The binding inherits the provider's actions. The existing Adobe-managed
+`/adobeio/shared-validators-v1/headless-v2` dependency is explicitly accepted as an existing
+trusted Runtime provider that already receives package credentials; its execute-only source
+was not reviewed. Do not invoke asset-matcher sequences as deployment probes or reflect/log
+inherited inputs. Rollback restores the previous executable and Mesh route/SDL before removing
+the new binding.
+
+The `aero_bundle_entitlements` and `aero_bundle_redemptions` collections use unique `_id`
+records; verify their live Database Storage readiness before enabling the consumer. Source
+tests alone are insufficient. The policy defaults off when its feature switch is absent.
+
 **Approval lifetime versus quote freshness:** the 15-minute investigation quote bounds
 create/update/IMS activation review, not an already enabled campaign's lifetime.
 `startsAt`/`endsAt` and `enabled` govern that lifetime (`endsAt: null` has no implicit 15-minute end).
@@ -52,16 +133,25 @@ of a particular Production cart.
 automatic kits with at least one exact component already present and positive remaining
 quantities. Cart ownership/active-state checks are identical to `cart`; the query is no-store
 and reads fresh server cart/catalog data. Each offer contains `promotion_id`, `bundle_id`,
-`name`, **per-request** `quote_expires_at`, `saving { value currency }`, and
+`cart_version`, `name`, **per-request** `quote_expires_at`, `saving { value currency }`, and
 `components { sku name required_quantity cart_quantity missing_quantity unit_price { value currency } }`.
 Same-SKU cart quantities are aggregated, one kit only. Suggestions are suppressed unless the
 kit wins the projected completed cart against current coupons/automatics, including date,
 minimum-spend and server audience eligibility checks. Saving is the projected complete-cart
 kit discount, not incremental savings or permission to stack discounts.
-Call existing `addProductsToCart` with only the returned exact SKU and missing quantity;
-exact configurable variant SKUs already resolve server-side without `selected_options`.
-Refresh the cart afterward; the real cart/order evaluator remains the discount authority.
-No recommendation mutation or private evidence/registry endpoint is introduced.
+`completeWkndBundle(cart_id: String!, promotion_id: String!, bundle_id: String!,
+expected_cart_version: String!): AddProductsToCartOutput` completes the displayed offer in
+one server operation. Pass its exact `cart_version`; never send component quantities or prices.
+The server checks ownership/active state and revision, reloads current definitions and all required
+financial facts, derives missing exact-SKU quantities, and validates the whole completed cart and
+winning promotion before one revision CAS. It never rebases a conflict or partially adds a kit.
+Success returns the authoritative `cart` and empty `user_errors`. Failures are GraphQL errors:
+`CART_CHANGED` for a stale revision/race, `BUNDLE_UNAVAILABLE` for a withdrawn/ineligible offer,
+or the existing cart/stock error; no completion write occurs.
+The nullable root can be aliased `addProductsToCart: completeWkndBundle(...)` for standard client
+normalization, with ordered `estimateShippingMethods` / `estimateTotals` siblings in the same mutation.
+Those estimates still validate their own inputs and report independent errors; a committed completion
+must remain observable if a later estimate fails. Ordinary product additions remain unchanged.
 
 An uncertain create/update retains the original UUID and freezes the editor. **Check saved
 request** performs only `promotions.get` with
@@ -565,9 +655,28 @@ An active `promotions-worker-rule` must connect the `promotions-worker-tick` ala
 (`*/5 * * * *`, `/whisk.system/alarms/alarm`) to this namespace's `commerce/promotions-worker`.
 
 Cart reads, session restoration and viewing the offer do not reset `activityAt`; item changes
-do. A claimed entitlement is valid only for the current qualifying episode and becomes
+do. Metadata writes preserve a legacy cart's previous `updatedAt` (or `createdAt`) as its
+activity timestamp before advancing `updatedAt`; planner reconciliation must not restart
+the recovery clock. A claimed entitlement is valid only for the current qualifying episode and becomes
 ineligible after new activity or a subsequent purchase. The send loop also rechecks the same
 episode timestamp immediately before sending, so a new episode cannot consume an old ledger.
+Read-only offer display reuses only the candidate validated by that same request's status check.
+Current cart coupons retain normal fresh trust and pricing evaluation; claim/apply paths do not
+use this display shortcut. No candidate, financial record or eligibility decision is cached
+between requests.
+`wkndCustomerRecoveryOffer` is an authenticated, read-only, no-argument alternative for starting
+recovery evaluation alongside initial `customerCart` loading. It selects the same newest active
+owned cart, but returns null rather than creating one if none exists. The response includes
+`cart_id`, `cart_version`, `items { uid quantity }`, `applied_coupon_codes` and the existing
+`offer: WkndRecoveryOffer` payload, evaluated against that exact snapshot. It never shapes/saves
+the cart, changes inactivity, claims an entitlement or places an order. Consumers must withhold
+the offer until their current cart matches the snapshot, and discard/recheck after an edit,
+cart replacement or sign-out. Existing cart-ID recovery queries and financial mutations are unchanged.
+Cart/customer-cart reads and item add/remove start cart-independent migration/automatic-definition
+reads alongside the cart lookup. Cart ownership/not-found errors retain priority if both reads
+fail; definition failures remain explicit. Source reads stay request-owned and are refreshed after
+a cart revision conflict. Cart-specific coupons, financial records and trust are still evaluated
+against the actual cart; quantity updates retain their existing preload path.
 The campaign identity, one-redemption-per-account rule and one-email-per-episode ledger
 are retained; shortening the window does not reset earlier redemptions or resend old emails.
 

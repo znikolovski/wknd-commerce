@@ -98,10 +98,23 @@ reserved to prevent double redemption. A durably inserted order consumes it, eve
 bookkeeping fails. Claim does not consume redemption. `REDEEMED` also covers a pending
 reservation whose outcome must not be blindly retried.
 
-Deployment must provision the dedicated server secret and the explicit feature switch as
-final action parameters, preserving all other action configuration, before enabling the
-consumer. The `aero_bundle_entitlements` and `aero_bundle_redemptions` collections use unique
-`_id` records; source tests do not establish live Database Storage readiness. Default is off.
+Production supplies the dedicated secret and `AERO_BUNDLE_ENABLED=true` as the only two
+binding-owned parameters on the private, same-namespace `commerce-aero` package binding to
+`commerce`. The public Mesh endpoint is unchanged; only its storefront source package path
+changes to `commerce-aero`, alongside the additive SDL. Original action/package defaults,
+annotations, sequences and unrelated Mesh configuration remain unchanged. Never replay
+encrypted Runtime GET parameter values into an update.
+
+The binding inherits the provider's actions. The existing Adobe-managed
+`/adobeio/shared-validators-v1/headless-v2` dependency is explicitly accepted as an existing
+trusted Runtime provider that already receives package credentials; its execute-only source
+was not reviewed. Do not invoke asset-matcher sequences as deployment probes or reflect/log
+inherited inputs. Rollback restores the previous executable and Mesh route/SDL before removing
+the new binding.
+
+The `aero_bundle_entitlements` and `aero_bundle_redemptions` collections use unique `_id`
+records; verify their live Database Storage readiness before enabling the consumer. Source
+tests alone are insufficient. The policy defaults off when its feature switch is absent.
 
 **Approval lifetime versus quote freshness:** the 15-minute investigation quote bounds
 create/update/IMS activation review, not an already enabled campaign's lifetime.

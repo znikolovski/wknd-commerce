@@ -33,6 +33,16 @@ architecture and `docs/SHOP-ANALYTICS-PLAN.md` for analytics.
 Data lives in App Builder Database Storage (`aio-lib-db`). Prices are AUD and GST-inclusive.
 Payment is **WKND Demo Pay**, which takes no real payment.
 
+### Catalog reads on the cart critical path
+
+Cold catalog loads and fresh bundle-pricing checks read the five catalog
+collections concurrently, with one independent cursor per collection.
+Each read still verifies its document count and retries incomplete results;
+fresh reads bypass the cache and never fall back to an older snapshot.
+This replaces the five-collection database waterfall with overlapping reads without relaxing price,
+stock, promotion, consent or cart-revision checks. Personalized cart responses
+remain `no-store`; no customer or offer-eligibility cache is introduced.
+
 ## Setup
 
 1. `aio app use` (Console project `wkndcommerce`, Stage workspace). Then copy `.env.example` to `.env`

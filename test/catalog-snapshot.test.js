@@ -91,3 +91,40 @@ test('snapshot reads ask for large cursor batches (each batch is a DB round trip
   expect(options).toHaveLength(5);
   options.forEach((o) => expect(o.batchSize).toBeGreaterThanOrEqual(1000));
 });
+
+test('fresh snapshots overlap independent collection reads without bypassing completeness checks', async () => {
+  const started = [];
+  const counted = [];
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const delayed = {
+    ...store,
+    collection(name) {
+      const coll = store.collection(name);
+      return {
+        findOne: (...args) => coll.findOne(...args),
+        find: async (...args) => {
+          started.push(name);
+          await pending;
+          return coll.find(...args);
+        },
+        countDocuments: (...args) => {
+          counted.push(name);
+          return coll.countDocuments(...args);
+        },
+      };
+    },
+  };
+  const loading = loadCatalog(delayed, { fresh: true });
+  try {
+    await new Promise((resolve) => { setImmediate(resolve); });
+    expect(started).toEqual(['products', 'categories', 'prices', 'inventory', 'asset_links']);
+    expect(counted).toEqual(started);
+  } finally {
+    release();
+    await loading;
+  }
+  const cat = await loading;
+  expect(priceFor(cat, SKU).regular).toBeGreaterThan(0);
+  expect(cat.priceBySku.size).toBe(CATALOG.prices.length);
+});

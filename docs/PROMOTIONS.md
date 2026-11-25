@@ -52,16 +52,25 @@ of a particular Production cart.
 automatic kits with at least one exact component already present and positive remaining
 quantities. Cart ownership/active-state checks are identical to `cart`; the query is no-store
 and reads fresh server cart/catalog data. Each offer contains `promotion_id`, `bundle_id`,
-`name`, **per-request** `quote_expires_at`, `saving { value currency }`, and
+`cart_version`, `name`, **per-request** `quote_expires_at`, `saving { value currency }`, and
 `components { sku name required_quantity cart_quantity missing_quantity unit_price { value currency } }`.
 Same-SKU cart quantities are aggregated, one kit only. Suggestions are suppressed unless the
 kit wins the projected completed cart against current coupons/automatics, including date,
 minimum-spend and server audience eligibility checks. Saving is the projected complete-cart
 kit discount, not incremental savings or permission to stack discounts.
-Call existing `addProductsToCart` with only the returned exact SKU and missing quantity;
-exact configurable variant SKUs already resolve server-side without `selected_options`.
-Refresh the cart afterward; the real cart/order evaluator remains the discount authority.
-No recommendation mutation or private evidence/registry endpoint is introduced.
+`completeWkndBundle(cart_id: String!, promotion_id: String!, bundle_id: String!,
+expected_cart_version: String!): AddProductsToCartOutput` completes the displayed offer in
+one server operation. Pass its exact `cart_version`; never send component quantities or prices.
+The server checks ownership/active state and revision, reloads current definitions and all required
+financial facts, derives missing exact-SKU quantities, and validates the whole completed cart and
+winning promotion before one revision CAS. It never rebases a conflict or partially adds a kit.
+Success returns the authoritative `cart` and empty `user_errors`. Failures are GraphQL errors:
+`CART_CHANGED` for a stale revision/race, `BUNDLE_UNAVAILABLE` for a withdrawn/ineligible offer,
+or the existing cart/stock error; no completion write occurs.
+The nullable root can be aliased `addProductsToCart: completeWkndBundle(...)` for standard client
+normalization, with ordered `estimateShippingMethods` / `estimateTotals` siblings in the same mutation.
+Those estimates still validate their own inputs and report independent errors; a committed completion
+must remain observable if a later estimate fails. Ordinary product additions remain unchanged.
 
 An uncertain create/update retains the original UUID and freezes the editor. **Check saved
 request** performs only `promotions.get` with

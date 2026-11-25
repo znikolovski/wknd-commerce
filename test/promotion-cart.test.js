@@ -524,6 +524,83 @@ describe('protected cart recovery', () => {
     expect((await gql(`query($id: String!) { cart(cart_id: $id) { ${CART_FIELDS} } }`, { id })).data.cart.applied_coupons).toEqual([{ code: 'WKND10' }]);
   });
 
+  test('eligible display reuses only its validated candidate and performs each recovery guard once', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await age(id, 1);
+    const policies = jest.spyOn(store.collection('recovery_policies'), 'find');
+    const redeemed = jest.spyOn(store.collection('recovery_redemptions'), 'findOne');
+    const purchases = jest.spyOn(store.collection('orders'), 'countDocuments');
+    const entitlements = jest.spyOn(store.collection('recovery_entitlements'), 'findOne');
+    const promotions = jest.spyOn(store.collection('promotions'), 'find');
+    const result = await gql(`query($id:String!){
+      wkndRecoveryOffer(cart_id:$id){status saving{value} current_saving{value}}
+    }`, { id });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.wkndRecoveryOffer).toMatchObject({
+      status: 'ELIGIBLE', saving: { value: 25 }, current_saving: { value: 0 },
+    });
+    [policies, redeemed, purchases, entitlements].forEach((read) => expect(read).toHaveBeenCalledTimes(1));
+    expect(promotions.mock.calls.some(([filter]) => filter.code?.$in?.includes('RECOVER10'))).toBe(false);
+    expect(await store.collection('recovery_entitlements').countDocuments({})).toBe(0);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    const applied = await gql(APPLY, { id, code: 'RECOVER10' });
+    expect(applied.errors[0].message).toBe('Coupon is not available for this shopper.');
+  });
+
+  test('display refreshes cart financial facts and current-coupon validity without caching a candidate between requests', async () => {
+    const catalog = await loadCatalog(store);
+    const [kit] = (await bundleOpportunities(store, {}, { catalog: async () => catalog })).opportunities;
+    const service = createPromotionService({ store, loadCatalog: () => loadCatalog(store) });
+    const actor = { actor: { kind: 'ims-operator', subject: 'op', orgId: 'ORG@AdobeOrg' }, correlationId: crypto.randomUUID() };
+    const promotion = {
+      name: 'Fresh display kit', enabled: false, mode: 'automatic', code: null,
+      discount: { kind: 'percentage', basisPoints: 1000 }, maxDiscountMinor: null, minimumMerchandiseMinor: null,
+      target: {
+        kind: 'bundle', bundleId: kit.bundleId, experimentId: null, currency: 'AUD',
+        quoteExpiresAt: kit.quoteExpiresAt, safetyBuffer: kit.safetyBuffer,
+        components: kit.components.map(({ sku, quantity, unitPriceMinor }) => ({ sku, quantity, unitPriceMinor })),
+      },
+      startsAt: null, endsAt: null, audienceRestriction: null,
+    };
+    const created = await service.createPromotion(actor, { idempotencyKey: crypto.randomUUID(), promotion });
+    expect(created.ok).toBe(true);
+    expect(await service.updatePromotion(actor, {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+      promotion: { ...promotion, enabled: true },
+    })).toMatchObject({ ok: true });
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await gql(APPLY, { id, code: 'WKND10' });
+    await age(id, 1);
+    const query = `query($id:String!){wkndRecoveryOffer(cart_id:$id){status saving{value} current_saving{value}}}`;
+    const first = await gql(query, { id });
+    expect(first.errors).toBeUndefined();
+    expect(first.data.wkndRecoveryOffer.saving.value).toBe(25);
+    await store.collection('prices').updateOne({ sku: pricey.sku }, { $set: { regular: 50, special: null } });
+    const repriced = await gql(query, { id });
+    expect(repriced.errors).toBeUndefined();
+    expect(repriced.data.wkndRecoveryOffer).toMatchObject({
+      status: 'ELIGIBLE', saving: { value: 5 }, current_saving: { value: 5 },
+    });
+    expect(await service.disablePromotion(actor, {
+      id: LEGACY_SEEDS[0].id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+    })).toMatchObject({ ok: true });
+    const currentDisabled = await gql(query, { id });
+    expect(currentDisabled.errors).toBeUndefined();
+    expect(currentDisabled.data.wkndRecoveryOffer).toMatchObject({
+      status: 'ELIGIBLE', saving: { value: 5 }, current_saving: { value: 0 },
+    });
+    expect(await store.collection('recovery_entitlements').countDocuments({})).toBe(0);
+    const current = await store.collection('promotions').findOne({ id: RID });
+    expect(await service.disablePromotion(actor, {
+      id: RID, expectedRevision: current.revision, idempotencyKey: crypto.randomUUID(),
+    })).toMatchObject({ ok: true });
+    expect((await gql(query, { id })).data.wkndRecoveryOffer).toMatchObject({
+      status: 'UNAVAILABLE', saving: null, current_saving: null,
+    });
+  });
+
   test('unavailable offers carry no saving figures', async () => {
     const COMPARE = 'query Offer($id: String!) { wkndRecoveryOffer(cart_id: $id) { status saving { value } current_saving { value } } }';
     const id = await customerCartId();
@@ -545,6 +622,13 @@ describe('protected cart recovery', () => {
     const subtotal = applied.prices.subtotal_including_tax.value;
     const expected = Math.min(Math.round(subtotal * 100 * 0.1), 2500) / 100;
     expect(applied.prices.discounts[0].amount.value).toBe(expected);
+    const currentOffer = await gql(`query($id:String!){
+      wkndRecoveryOffer(cart_id:$id){status saving{value} current_saving{value}}
+    }`, { id });
+    expect(currentOffer.errors).toBeUndefined();
+    expect(currentOffer.data.wkndRecoveryOffer).toMatchObject({
+      status: 'CLAIMED', saving: { value: expected }, current_saving: { value: expected },
+    });
     await readyForCheckout(id);
     const placed = await gql(PLACE, { id });
     expect(placed.data.placeOrder.errors).toEqual([]);

@@ -570,6 +570,10 @@ activity timestamp before advancing `updatedAt`; planner reconciliation must not
 the recovery clock. A claimed entitlement is valid only for the current qualifying episode and becomes
 ineligible after new activity or a subsequent purchase. The send loop also rechecks the same
 episode timestamp immediately before sending, so a new episode cannot consume an old ledger.
+Read-only offer display reuses only the candidate validated by that same request's status check.
+Current cart coupons retain normal fresh trust and pricing evaluation; claim/apply paths do not
+use this display shortcut. No candidate, financial record or eligibility decision is cached
+between requests.
 The campaign identity, one-redemption-per-account rule and one-email-per-episode ledger
 are retained; shortening the window does not reset earlier redemptions or resend old emails.
 

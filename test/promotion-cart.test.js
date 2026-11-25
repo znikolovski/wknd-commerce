@@ -148,6 +148,7 @@ test('quantity CAS retry discards scoped stock reads and revalidates the latest 
   const cart = await store.collection('carts').findOne({ id });
   const carts = store.collection('carts');
   const replace = carts.replaceOne.bind(carts);
+  const migrationRead = jest.spyOn(store.collection('promotion_meta'), 'findOne');
   jest.spyOn(carts, 'replaceOne').mockImplementationOnce(async (filter, next) => {
     await store.collection('inventory').updateOne({ sku: cheap.sku }, { $set: { qty: 2 } });
     await carts.updateOne({ id }, { $inc: { revision: 1 } });
@@ -161,6 +162,7 @@ test('quantity CAS retry discards scoped stock reads and revalidates the latest 
   expect(result.data.updateCartItems).toMatchObject({
     cart: { total_quantity: 2 }, errors: [{ code: 'INSUFFICIENT_STOCK' }],
   });
+  expect(migrationRead).toHaveBeenCalledTimes(2);
 });
 
 test('quantity zero can still remove a now-disabled product without using stale financial facts', async () => {
@@ -174,6 +176,60 @@ test('quantity zero can still remove a now-disabled product without using stale 
     }}`, { id, uid: cart.items[0].uid });
   expect(result.errors).toBeUndefined();
   expect(result.data.updateCartItems).toMatchObject({ cart: { total_quantity: 0 }, errors: [] });
+});
+
+describe('ordered cart mutation and estimate outcomes', () => {
+  const batch = `mutation($id:String!,$uid:ID!,$estimateId:String!){
+    updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){
+      cart{total_quantity} errors{code}
+    }
+    estimated:estimateTotals(input:{cart_id:$estimateId,address:{country_code:AU}}){cart{total_quantity}}
+  }`;
+
+  test.each(['missing', 'another-owner'])('post-write %s estimate errors preserve the committed update outcome', async (kind) => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    const cart = await store.collection('carts').findOne({ id });
+    const estimateId = 'invalid-estimate-cart';
+    if (kind === 'another-owner') {
+      await store.collection('carts').insertOne({ ...cart, id: estimateId, customerSub: 'auth0|other-shopper' });
+    }
+    const result = await gql(batch, { id, uid: cart.items[0].uid, estimateId });
+    expect(result.data.updateCartItems).toMatchObject({ cart: { total_quantity: 2 }, errors: [] });
+    expect(result.data.estimated.cart).toBeNull();
+    expect(result.errors[0]).toMatchObject({
+      path: ['estimated', 'cart'],
+      extensions: { category: kind === 'missing' ? 'graphql-no-such-entity' : 'graphql-authorization' },
+    });
+    expect((await store.collection('carts').findOne({ id })).items[0].quantity).toBe(2);
+  });
+
+  test('empty cart and partial update errors remain visible alongside destination estimates', async () => {
+    const id = await customerCartId();
+    const empty = await gql(`mutation($id:String!){
+      updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:"missing",quantity:2}]}){cart{total_quantity} errors{code}}
+      shipping:estimateShippingMethods(input:{cart_id:$id,address:{country_code:AU}}){method_code}
+      estimated:estimateTotals(input:{cart_id:$id,address:{country_code:AU}}){cart{total_quantity}}
+    }`, { id });
+    expect(empty.errors).toBeUndefined();
+    expect(empty.data.updateCartItems).toMatchObject({
+      cart: { total_quantity: 0 }, errors: [{ code: 'COULD_NOT_FIND_CART_ITEM' }],
+    });
+    expect(empty.data.estimated.cart.total_quantity).toBe(0);
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    const cart = await store.collection('carts').findOne({ id });
+    const partial = await gql(`mutation($id:String!,$uid:ID!){
+      updateCartItems(input:{cart_id:$id,cart_items:[
+        {cart_item_uid:$uid,quantity:2},{cart_item_uid:"missing",quantity:1}
+      ]}){cart{total_quantity} errors{code}}
+      estimated:estimateTotals(input:{cart_id:$id,address:{country_code:AU}}){cart{total_quantity}}
+    }`, { id, uid: cart.items[0].uid });
+    expect(partial.errors).toBeUndefined();
+    expect(partial.data.updateCartItems).toMatchObject({
+      cart: { total_quantity: 2 }, errors: [{ code: 'COULD_NOT_FIND_CART_ITEM' }],
+    });
+    expect(partial.data.estimated.cart.total_quantity).toBe(2);
+  });
 });
 
 test.each(['placeOrder', 'setPaymentMethodAndPlaceOrder'])('bundle attribution persists through %s using fresh exact-variant prices', async (operation) => {

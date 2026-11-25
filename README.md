@@ -47,6 +47,13 @@ every cart SKU and every enabled bundle component, including current sibling var
 used by displayed product price ranges. Filtered reads retain count verification and
 incomplete-read retries; missing current cart financial records fail closed.
 Reads may be shared only inside the same request and are discarded on cart CAS retries.
+Quantity updates preload current automatic definitions alongside the cart read and refresh
+the complete cart/bundle scope before CAS. Successful CAS retains that request's source
+reads, but promotion eligibility is recomputed for the changed cart. Definition reads
+are also request-owned and discarded on conflicts; trust decisions are never memoized.
+Ordered mutation fields can share these reads without replacing destination estimates
+with merchandise totals. Estimation failures surface at the nullable `estimateTotals.cart`
+field, retaining earlier committed mutation outcomes and their errors in the same response.
 Categories and images come from the structural catalog snapshot,
 not a second full financial reload. Targeted snapshots are never cached between
 requests.

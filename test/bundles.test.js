@@ -106,6 +106,92 @@ test('bundle proposals start disabled and only individual IMS approval can activ
   })).toMatchObject({ ok: false, committed: false, error: { code: 'VALIDATION_ERROR' } });
 });
 
+describe('request-owned financial and definition reads', () => {
+  async function enabledCart(components) {
+    const created = await service.createPromotion(ctx(), { idempotencyKey: crypto.randomUUID(), promotion: definition() });
+    expect(await service.updatePromotion(ctx(), {
+      id: created.promotion.id, expectedRevision: 1, idempotencyKey: crypto.randomUUID(),
+      promotion: { ...definition(), enabled: true },
+    })).toMatchObject({ ok: true });
+    const cart = await createCart(store);
+    const items = components.map((c, i) => ({
+      uid: `L${i}`, sku: c.sku, quantity: c.quantity,
+      parentSku: (cat.byVariantSku.get(c.sku)?.parent || cat.bySku.get(c.sku)).sku,
+    }));
+    await store.collection('carts').updateOne({ id: cart.id }, { $set: { items } });
+    return { ...cart, items };
+  }
+
+  test('quantity updates read the entire bundle scope before CAS and a new request observes changed prices', async () => {
+    const cart = await enabledCart(opportunity.components.slice(0, 1));
+    let phase = 'before-cas';
+    const reads = [];
+    for (const name of ['products', 'prices', 'inventory']) {
+      const collection = store.collection(name);
+      for (const method of ['findOne', 'find', 'countDocuments']) {
+        const original = collection[method].bind(collection);
+        jest.spyOn(collection, method).mockImplementation((...args) => {
+          reads.push({ name, phase });
+          return original(...args);
+        });
+      }
+    }
+    const carts = store.collection('carts');
+    const replace = carts.replaceOne.bind(carts);
+    jest.spyOn(carts, 'replaceOne').mockImplementation(async (...args) => {
+      const saved = await replace(...args);
+      phase = 'after-cas';
+      return saved;
+    });
+    const mutation = `mutation($id:String!,$uid:ID!){
+      updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){
+        cart{prices{grand_total{value}}} errors{code}
+      }
+    }`;
+    const first = await runGraphQL({ query: mutation, variables: { id: cart.id, uid: cart.items[0].uid } }, { store });
+    expect(first.body.errors).toBeUndefined();
+    expect(first.body.data.updateCartItems.errors).toEqual([]);
+    expect(reads.length).toBeGreaterThan(0);
+    expect(reads.every((read) => read.phase === 'before-cas')).toBe(true);
+    const price = cat.priceBySku.get(cart.items[0].sku);
+    await store.collection('prices').updateOne({ sku: cart.items[0].sku }, { $set: { regular: price.regular + 10, special: null } });
+    reads.length = 0;
+    phase = 'new-request';
+    const next = await runGraphQL({
+      query: 'query($id:String!){cart(cart_id:$id){prices{grand_total{value}}}}', variables: { id: cart.id },
+    }, { store });
+    expect(next.body.errors).toBeUndefined();
+    expect(reads.length).toBeGreaterThan(0);
+    expect(next.body.data.cart.prices.grand_total.value).toBeGreaterThan(first.body.data.updateCartItems.cart.prices.grand_total.value);
+  });
+
+  test('serial mutation fields share source reads but recompute bundle eligibility for each new cart', async () => {
+    const cart = await enabledCart(opportunity.components);
+    const definitionsRead = jest.spyOn(store.collection('promotions'), 'find');
+    const query = `mutation($id:String!,$uid:ID!,$qty:Float!){
+      first:updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:$qty}]}){errors{code}}
+      complete:estimateTotals(input:{cart_id:$id,address:{country_code:AU},shipping_method:{carrier_code:"wknd",method_code:"standard"}}){
+        cart{prices{discounts{label amount{value}}}}
+      }
+      second:updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:0}]}){errors{code}}
+      partial:estimateTotals(input:{cart_id:$id,address:{country_code:AU},shipping_method:{carrier_code:"wknd",method_code:"standard"}}){
+        cart{prices{discounts{label amount{value}}}}
+      }
+    }`;
+    const result = await runGraphQL({
+      query, variables: { id: cart.id, uid: cart.items[0].uid, qty: cart.items[0].quantity },
+    }, { store });
+    expect(result.body.errors).toBeUndefined();
+    expect(result.body.data.first.errors).toEqual([]);
+    expect(result.body.data.second.errors).toEqual([]);
+    expect(result.body.data.complete.cart.prices.discounts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ label: definition().name }),
+    ]));
+    expect(result.body.data.partial.cart.prices.discounts.some((discount) => discount.label === definition().name)).toBe(false);
+    expect(definitionsRead.mock.calls.filter(([filter]) => filter.mode === 'automatic')).toHaveLength(1);
+  });
+});
+
 test('enabled approval survives the proposal quote expiry by re-quoting fresh catalog facts, without changing stored approval or weakening stock/date checks', async () => {
   const promotion = {
     ...definition(), discount: { kind: 'percentage', basisPoints: 5000 },

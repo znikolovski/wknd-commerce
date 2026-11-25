@@ -574,6 +574,11 @@ Read-only offer display reuses only the candidate validated by that same request
 Current cart coupons retain normal fresh trust and pricing evaluation; claim/apply paths do not
 use this display shortcut. No candidate, financial record or eligibility decision is cached
 between requests.
+Cart/customer-cart reads and item add/remove start cart-independent migration/automatic-definition
+reads alongside the cart lookup. Cart ownership/not-found errors retain priority if both reads
+fail; definition failures remain explicit. Source reads stay request-owned and are refreshed after
+a cart revision conflict. Cart-specific coupons, financial records and trust are still evaluated
+against the actual cart; quantity updates retain their existing preload path.
 The campaign identity, one-redemption-per-account rule and one-email-per-episode ledger
 are retained; shortening the window does not reset earlier redemptions or resend old emails.
 

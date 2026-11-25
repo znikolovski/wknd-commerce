@@ -142,6 +142,113 @@ beforeEach(async () => {
   await importCatalog(store, CATALOG, { replace: true });
 });
 
+describe('cart read and add/remove definition overlap', () => {
+  const operations = {
+    cart: `query($id:String!){cart(cart_id:$id){${CART_FIELDS}}}`,
+    customerCart: `query{customerCart{${CART_FIELDS}}}`,
+    add: ADD,
+    remove: `mutation($id:String!,$uid:ID!){removeItemFromCart(input:{cart_id:$id,cart_item_uid:$uid}){cart{${CART_FIELDS}}}}`,
+  };
+
+  test.each(Object.keys(operations))('%s starts global definitions while the owned cart read is pending', async (operation) => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    await migrateLegacyPromotions(store);
+    const carts = store.collection('carts');
+    const uid = (await carts.findOne({ id })).items[0].uid;
+    let releaseCart;
+    const definitionsStarted = new Promise((resolve) => { releaseCart = resolve; });
+    const method = operation === 'customerCart' ? 'find' : 'findOne';
+    const read = carts[method].bind(carts);
+    jest.spyOn(carts, method).mockImplementationOnce(async (...args) => {
+      await definitionsStarted;
+      return read(...args);
+    });
+    const meta = store.collection('promotion_meta');
+    const migration = meta.findOne.bind(meta);
+    const migrationRead = jest.spyOn(meta, 'findOne').mockImplementation(async (...args) => {
+      releaseCart();
+      return migration(...args);
+    });
+    const result = await gql(operations[operation], { id, uid, sku: cheap.sku, qty: 1 });
+    expect(result.errors).toBeUndefined();
+    expect(migrationRead).toHaveBeenCalledTimes(1);
+    const saved = await carts.findOne({ id });
+    expect(saved.items.reduce((sum, item) => sum + item.quantity, 0)).toBe(operation === 'add' ? 2 : operation === 'remove' ? 0 : 1);
+  });
+
+  test.each(['missing', 'another-owner'])('a %s cart error takes priority over an earlier definition failure', async (kind) => {
+    const id = await customerCartId();
+    if (kind === 'missing') await store.collection('carts').deleteMany({ id });
+    else await store.collection('carts').updateOne({ id }, { $set: { customerSub: 'another-owner' } });
+    const carts = store.collection('carts');
+    const read = carts.findOne.bind(carts);
+    jest.spyOn(carts, 'findOne').mockImplementationOnce(async (...args) => {
+      await new Promise((resolve) => setImmediate(resolve));
+      return read(...args);
+    });
+    jest.spyOn(store.collection('promotion_meta'), 'findOne').mockRejectedValue(new Error('definitions unavailable'));
+    const result = await gql(operations.cart, { id });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].extensions.code).toBe(kind === 'missing' ? 'CART_NOT_FOUND' : 'UNAUTHORIZED');
+  });
+
+  test('customer authorization fails before any global definition read', async () => {
+    const migration = jest.spyOn(store.collection('promotion_meta'), 'findOne');
+    const result = await gql(operations.customerCart, {}, { auth: false });
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0].extensions.category).toBe('graphql-authorization');
+    expect(migration).not.toHaveBeenCalled();
+  });
+
+  test('an independent definition failure surfaces without committing an add', async () => {
+    const id = await customerCartId();
+    const carts = store.collection('carts');
+    const before = await carts.findOne({ id });
+    jest.spyOn(store.collection('promotion_meta'), 'findOne').mockRejectedValue(new Error('definitions unavailable'));
+    const result = await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    expect(result.errors[0].message).toBe('definitions unavailable');
+    expect(await carts.findOne({ id })).toEqual(before);
+  });
+
+  test.each(['add', 'remove'])('%s refreshes global definitions after a CAS conflict and on the next request', async (operation) => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await migrateLegacyPromotions(store);
+    const svc = createPromotionService({ store, loadCatalog: () => loadCatalog(store) });
+    const created = await svc.createPromotion({
+      actor: { kind: 'ims-operator', subject: 'op', orgId: 'ORG@AdobeOrg' }, correlationId: crypto.randomUUID(),
+    }, {
+      idempotencyKey: crypto.randomUUID(),
+      promotion: {
+        name: 'Fresh five off', enabled: true, mode: 'automatic',
+        discount: { kind: 'fixed', amountMinor: 500, currency: 'AUD' }, target: { kind: 'all' },
+      },
+    });
+    expect(created.ok).toBe(true);
+    const carts = store.collection('carts');
+    const uid = (await carts.findOne({ id })).items[0].uid;
+    const replace = carts.replaceOne.bind(carts);
+    const migration = jest.spyOn(store.collection('promotion_meta'), 'findOne');
+    jest.spyOn(carts, 'replaceOne').mockImplementationOnce(async (filter, next) => {
+      await carts.updateOne({ id }, { $inc: { revision: 1 } });
+      await store.collection('promotions').updateOne({ id: created.promotion.id }, { $set: { enabled: false } });
+      return replace(filter, next);
+    });
+    const changed = await gql(operations[operation], { id, uid, sku: cheap.sku, qty: 1 });
+    expect(changed.errors).toBeUndefined();
+    const result = operation === 'add' ? changed.data.addProductsToCart : changed.data.removeItemFromCart;
+    expect(result.cart.prices.discounts).toEqual([]);
+    expect(migration).toHaveBeenCalledTimes(2);
+    await store.collection('promotions').updateOne({ id: created.promotion.id }, { $set: { enabled: true } });
+    const next = await gql(operations.cart, { id });
+    expect(next.errors).toBeUndefined();
+    expect(next.data.cart.prices.discounts).toEqual([{ amount: { value: 5 }, label: 'Fresh five off', coupon: null }]);
+    expect(migration).toHaveBeenCalledTimes(3);
+  });
+});
+
 test('quantity CAS retry discards scoped stock reads and revalidates the latest inventory', async () => {
   const id = await customerCartId();
   await gql(ADD, { id, sku: cheap.sku, qty: 1 });

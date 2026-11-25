@@ -35,6 +35,74 @@ preserved on full replacement; enabling requires the separate, explicit confirma
 the current revision. The server rechecks inventory, prices and quote expiry. Aero remains
 a separate demo booking; this UI does not reserve real seats or combine reservations.
 
+### Confirmed Aero flight: Adventure Essentials
+
+The separately gated `AERO_BUNDLE_ENABLED=true` policy offers 50% off **one complete kit**:
+one `WKND-HYD-002` Collapsible Bottle 1L, one `WKND-LGT-001` Alpine Start Headlamp 400,
+and one `WKND-TRV-009` Wilderness First Aid Kit. Extra quantities and other merchandise
+are not included. Gear is a separate Commerce purchase; claiming does not edit/create a
+cart, reserve stock, book a flight or place an order.
+
+On the existing storefront GraphQL endpoint, using existing verified shopper authentication:
+
+```graphql
+query {
+  wkndAeroBundleOffer(booking_id: "BK_0123456789abcdef") {
+    status reason booking_id promotion_id bundle_id name percent_off expires_at
+    components { sku quantity name }
+  }
+}
+mutation {
+  claimWkndAeroBundleOffer(booking_id: "BK_0123456789abcdef") {
+    status reason booking_id promotion_id bundle_id name percent_off expires_at
+    components { sku quantity name }
+  }
+}
+```
+
+Both operations return the same DTO. Status is `ELIGIBLE`, `CLAIMED`, `REDEEMED` or
+`INELIGIBLE`. Disabled policy returns `INELIGIBLE/OFFER_DISABLED`; missing, foreign,
+unconfirmed, non-demo or expired bookings return `INELIGIBLE/BOOKING_NOT_ELIGIBLE`.
+Configuration, upstream and malformed-response errors are explicit GraphQL errors, never
+successful eligibility. No browser flags, client identity, price, grant or component inputs
+are accepted. Current authentication is unchanged; clients must use its accepted issuer
+and audience, not assume a client ID alone grants access.
+
+Commerce verifies ownership through the existing fixed
+`https://wknd-aero-api.jaggah.workers.dev/api/bookings/<booking_id>` read. It signs the
+verified shopper's subject using the dedicated Commerce parameter `WKND_BOOKING_ASSERTION_SECRET`,
+HS256, issuer `urn:wknd-commerce:storefront`,
+audience `https://wknd-aero-api.jaggah.workers.dev`, configured Auth0 `identity_issuer`,
+`bookings:read` scope, unique `jti` and a 60-second lifetime, with
+`X-WKND-Delegation: commerce`. Aero verifies this isolated branch using its separate
+`WKND_COMMERCE_BOOKING_ASSERTION_SECRET`; the existing MCP secret/issuer/branch are unchanged.
+Both dedicated parameters must be provisioned from the same private secret artifact, never
+from opaque configuration retrieval or by rotating the MCP key.
+The origin cannot be supplied or overridden by a browser.
+The existing Aero ownership-keyed lookup must return the exact ID, `confirmed`, `demo: true`
+and a valid non-future `createdAt`. Any confirmed owned demo flight qualifies; no route,
+fare, adventure tag or passenger details determine eligibility.
+
+Claim is idempotent per verified issuer/subject/booking. Expiry is exactly seven days from
+authoritative booking creation, not claim time; retry cannot renew it. The shared server
+entitlement survives cart edits and is read by every client through the same Commerce
+financial runtime—there is no client-side grant replication. Each evaluation re-verifies
+the current booking and unused entitlement, reads current kit prices/stock, and selects the
+single best discount without stacking. A complete kit receives 50% of current AUD unit
+prices, not a stored browser quote. Existing cart ownership, active status, quote, CAS and
+stock checks still apply.
+
+Both order roots share a unique booking/shopper redemption reservation before stock
+reservation. A proven stock rejection releases it; an uncertain order insertion leaves it
+reserved to prevent double redemption. A durably inserted order consumes it, even if later
+bookkeeping fails. Claim does not consume redemption. `REDEEMED` also covers a pending
+reservation whose outcome must not be blindly retried.
+
+Deployment must provision the dedicated server secret and the explicit feature switch as
+final action parameters, preserving all other action configuration, before enabling the
+consumer. The `aero_bundle_entitlements` and `aero_bundle_redemptions` collections use unique
+`_id` records; source tests do not establish live Database Storage readiness. Default is off.
+
 **Approval lifetime versus quote freshness:** the 15-minute investigation quote bounds
 create/update/IMS activation review, not an already enabled campaign's lifetime.
 `startsAt`/`endsAt` and `enabled` govern that lifetime (`endsAt: null` has no implicit 15-minute end).

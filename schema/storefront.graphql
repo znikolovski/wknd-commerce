@@ -560,6 +560,11 @@ type Query {
   of1Discovery(query: String!, history: [String!] = []): Of1Discovery!
 
   """
+  Read the owned confirmed demo booking's seven-day Adventure Essentials offer; no grant writes.
+  """
+  wkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
+
+  """
   Approved partial kits that win the projected completed cart's single-promotion evaluation.
   Display only: adding remaining exact SKUs re-evaluates current price, stock and eligibility.
   """
@@ -1872,6 +1877,11 @@ type Mutation {
   wording_version of the consent text the shopper saw. Not available to delegated agents.
   """
   setWkndMarketingEmailOptIn(opt_in: Boolean!, wording_version: String, source: WkndConsentSource = WEB): Boolean!
+
+  """
+  Claim the verified shopper's confirmed demo flight offer. Does not edit a cart or buy gear.
+  """
+  claimWkndAeroBundleOffer(booking_id: String!): WkndAeroBundleOffer!
 
   """
   Complete one currently eligible partial kit against the exact displayed cart revision.
@@ -23022,4 +23032,22 @@ type WkndBundleOffer {
   quote_expires_at: String!
   saving: Money!
   components: [WkndBundleOfferComponent!]!
+}
+
+type WkndAeroBundleComponent {
+  sku: String!
+  quantity: Float!
+  name: String!
+}
+
+type WkndAeroBundleOffer {
+  status: String!
+  reason: String
+  booking_id: String!
+  promotion_id: String
+  bundle_id: String
+  name: String
+  percent_off: Float
+  expires_at: String
+  components: [WkndAeroBundleComponent!]!
 }

@@ -565,7 +565,9 @@ An active `promotions-worker-rule` must connect the `promotions-worker-tick` ala
 (`*/5 * * * *`, `/whisk.system/alarms/alarm`) to this namespace's `commerce/promotions-worker`.
 
 Cart reads, session restoration and viewing the offer do not reset `activityAt`; item changes
-do. A claimed entitlement is valid only for the current qualifying episode and becomes
+do. Metadata writes preserve a legacy cart's previous `updatedAt` (or `createdAt`) as its
+activity timestamp before advancing `updatedAt`; planner reconciliation must not restart
+the recovery clock. A claimed entitlement is valid only for the current qualifying episode and becomes
 ineligible after new activity or a subsequent purchase. The send loop also rechecks the same
 episode timestamp immediately before sending, so a new episode cannot consume an old ledger.
 The campaign identity, one-redemption-per-account rule and one-email-per-episode ledger

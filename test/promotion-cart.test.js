@@ -39,9 +39,9 @@ const pricey = simples.find((p) => priceOf(p.sku).regular >= 300) || simples.fin
 
 let store;
 let params;
-async function gql(query, variables = {}, { auth = true, factService } = {}) {
+async function gql(query, variables = {}, { auth = true, factService, namespace } = {}) {
   const headers = auth ? { authorization: `Bearer ${TOKEN}` } : {};
-  const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify, factService });
+  const { body } = await runGraphQL({ query, variables, headers }, { store, params, verify, factService, namespace });
   return body;
 }
 
@@ -183,6 +183,7 @@ describe('ordered cart mutation and estimate outcomes', () => {
     updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){
       cart{total_quantity} errors{code}
     }
+    shipping:estimateShippingMethods(input:{cart_id:$estimateId,address:{country_code:AU}}){method_code}
     estimated:estimateTotals(input:{cart_id:$estimateId,address:{country_code:AU}}){cart{total_quantity}}
   }`;
 
@@ -196,9 +197,13 @@ describe('ordered cart mutation and estimate outcomes', () => {
     }
     const result = await gql(batch, { id, uid: cart.items[0].uid, estimateId });
     expect(result.data.updateCartItems).toMatchObject({ cart: { total_quantity: 2 }, errors: [] });
+    expect(result.data.shipping).toBeNull();
     expect(result.data.estimated.cart).toBeNull();
-    expect(result.errors[0]).toMatchObject({
+    expect(result.errors.find((error) => error.path.join('.') === 'estimated.cart')).toMatchObject({
       path: ['estimated', 'cart'],
+      extensions: { category: kind === 'missing' ? 'graphql-no-such-entity' : 'graphql-authorization' },
+    });
+    expect(result.errors.find((error) => error.path.join('.') === 'shipping')).toMatchObject({
       extensions: { category: kind === 'missing' ? 'graphql-no-such-entity' : 'graphql-authorization' },
     });
     expect((await store.collection('carts').findOne({ id })).items[0].quantity).toBe(2);
@@ -229,6 +234,21 @@ describe('ordered cart mutation and estimate outcomes', () => {
       cart: { total_quantity: 2 }, errors: [{ code: 'COULD_NOT_FIND_CART_ITEM' }],
     });
     expect(partial.data.estimated.cart.total_quantity).toBe(2);
+  });
+
+  test('partial add user_errors preserve the actual mutation outcome alongside the estimate', async () => {
+    const id = await customerCartId();
+    const result = await gql(`mutation($id:String!,$sku:String!){
+      addProductsToCart(cartId:$id,cartItems:[{sku:$sku,quantity:1},{sku:"NOT-A-PRODUCT",quantity:1}]){
+        cart{total_quantity} user_errors{code}
+      }
+      estimated:estimateTotals(input:{cart_id:$id,address:{country_code:AU}}){cart{total_quantity}}
+    }`, { id, sku: cheap.sku });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.addProductsToCart).toMatchObject({
+      cart: { total_quantity: 1 }, user_errors: [{ code: 'PRODUCT_NOT_FOUND' }],
+    });
+    expect(result.data.estimated.cart.total_quantity).toBe(1);
   });
 });
 
@@ -403,6 +423,34 @@ describe('protected cart recovery', () => {
   test('guests cannot see or claim offers', async () => {
     const r = await gql(OFFER, { id: 'anything' }, { auth: false });
     expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
+  });
+
+  test('legacy inactivity survives a customerCart planner metadata write, while quantity edits reset it', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    const previousActivity = new Date(Date.now() - HOUR).toISOString();
+    await store.collection('carts').updateOne({ id }, {
+      $unset: { activityAt: '' },
+      $set: { updatedAt: previousActivity, stagePlannerPricing: 'old-planner-fingerprint' },
+    });
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('ELIGIBLE');
+    const initial = await gql('query{customerCart{id wknd_cart_version}}', {}, { namespace: '28538-wkndcommerce-stage' });
+    expect(initial.errors).toBeUndefined();
+    const metadataWritten = await store.collection('carts').findOne({ id });
+    expect(metadataWritten.updatedAt).not.toBe(previousActivity);
+    expect(metadataWritten.stagePlannerPricing).not.toBe('old-planner-fingerprint');
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer.status).toBe('ELIGIBLE');
+    expect(metadataWritten.activityAt).toBe(previousActivity);
+    expect(await store.collection('recovery_entitlements').countDocuments({})).toBe(0);
+    expect(await store.collection('recovery_redemptions').countDocuments({})).toBe(0);
+    const edited = await gql(`mutation($id:String!,$uid:ID!){
+      updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){errors{code}}
+    }`, { id, uid: metadataWritten.items[0].uid });
+    expect(edited.errors).toBeUndefined();
+    expect(edited.data.updateCartItems.errors).toEqual([]);
+    expect((await gql(OFFER, { id })).data.wkndRecoveryOffer).toMatchObject({
+      status: 'INELIGIBLE', reason: 'NOT_IN_RECOVERY_WINDOW',
+    });
   });
 
   test('offer and claim qualify at 55 minutes and survive ordinary cart reads, not beyond 7 days', async () => {

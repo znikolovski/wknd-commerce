@@ -58,7 +58,9 @@ source with the same timestamp does not create another episode.
   never its eligibility evaluator. A present malformed activity timestamp does not fall back to a
   newer generic write. Timestamps must be canonical server UTC ISO strings and not in the future.
 - `cart.js` already updates `activityAt` for item add/update/remove and non-empty merges. Generic
-  `saveCart` writes update `updatedAt` and the revision, not `activityAt`.
+  `saveCart` writes update `updatedAt` and the revision, preserving existing `activityAt`.
+  Legacy carts without it first retain their prior `updatedAt` or `createdAt` as `activityAt`,
+  so metadata-only writes do not reset inactivity.
 - Orders are the actual owner's persisted records across **all carts**. An order at or after
   the activity timestamp establishes `recorded`; `Processing (demo)` maps to `processing-demo`.
   This means a demo order was recorded, not that money was charged.

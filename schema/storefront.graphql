@@ -548,6 +548,12 @@ type Query {
   wkndRecoveryOffer(cart_id: String!): WkndRecoveryOffer!
 
   """
+  Existing current owned active cart's recovery status and matching snapshot. Read-only:
+  no cart is created or saved. Null means no existing active cart; authorization is required.
+  """
+  wkndCustomerRecoveryOffer: WkndCustomerRecoveryOffer
+
+  """
   Stage mock-Commerce planner benefit; automatic selection, no claim/apply mutation.
   """
   wkndPlannerOffer(cart_id: String!): WkndRecoveryOffer!
@@ -22913,6 +22919,19 @@ input ViewHistory {
 input ViewHistoryInput {
   dateTime: DateTime
   sku: String!
+}
+
+type WkndRecoveryCartItemSnapshot {
+  uid: ID!
+  quantity: Float!
+}
+
+type WkndCustomerRecoveryOffer {
+  cart_id: String!
+  cart_version: String!
+  items: [WkndRecoveryCartItemSnapshot!]!
+  applied_coupon_codes: [String!]!
+  offer: WkndRecoveryOffer!
 }
 
 enum WkndRecoveryOfferApplicationOutcome {

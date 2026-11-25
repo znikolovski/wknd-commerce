@@ -49,6 +49,12 @@ const CART_FIELDS = 'id applied_coupons { code } prices { grand_total { value } 
 const ADD = `mutation Add($id: String!, $sku: String!, $qty: Float!) { addProductsToCart(cartId: $id, cartItems: [{ sku: $sku, quantity: $qty }]) { cart { ${CART_FIELDS} } user_errors { code message } } }`;
 const APPLY = `mutation Apply($id: String!, $code: String!) { applyCouponToCart(input: { cart_id: $id, coupon_code: $code }) { cart { ${CART_FIELDS} } } }`;
 const OFFER = 'query Offer($id: String!) { wkndRecoveryOffer(cart_id: $id) { status reason coupon_code percent_off max_discount { value } expires_at } }';
+const CUSTOMER_OFFER = `query CustomerRecovery {
+  wkndCustomerRecoveryOffer {
+    cart_id cart_version items { uid quantity } applied_coupon_codes
+    offer { status reason coupon_code saving { value currency } current_saving { value currency } }
+  }
+}`;
 const CLAIM = 'mutation Claim($id: String!) { claimWkndRecoveryOffer(cart_id: $id) { status reason coupon_code percent_off max_discount { value } expires_at } }';
 const PLACE = 'mutation Place($id: String!) { placeOrder(input: { cart_id: $id }) { errors { code message } orderV2 { number total { discounts { amount { value } } grand_total { value } } } } }';
 
@@ -530,6 +536,81 @@ describe('protected cart recovery', () => {
   test('guests cannot see or claim offers', async () => {
     const r = await gql(OFFER, { id: 'anything' }, { auth: false });
     expect(r.errors[0].extensions.category).toMatch(/graphql-auth/);
+  });
+
+  test('customer recovery requires authorization and never creates a missing active cart', async () => {
+    const writes = jest.spyOn(store.collection('carts'), 'insertOne');
+    const guest = await gql(CUSTOMER_OFFER, {}, { auth: false });
+    expect(guest.errors[0].extensions.category).toBe('graphql-authorization');
+    const invalid = await runGraphQL({
+      query: CUSTOMER_OFFER, headers: { authorization: 'Bearer invalid' },
+    }, { store, params, verify });
+    expect(invalid.body.errors[0].extensions.category).toBe('graphql-authentication');
+    const signedIn = await gql(CUSTOMER_OFFER);
+    expect(signedIn.errors).toBeUndefined();
+    expect(signedIn.data.wkndCustomerRecoveryOffer).toBeNull();
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  test('customer recovery selects only the same newest active owned cart as customerCart', async () => {
+    const id = await customerCartId();
+    const original = await store.collection('carts').findOne({ id });
+    const carts = store.collection('carts');
+    await carts.insertOne({ ...original, id: 'newest-owned', updatedAt: '2099-01-01T00:00:00.000Z' });
+    await carts.insertOne({ ...original, id: 'inactive-owned', status: 'ordered', updatedAt: '2099-02-01T00:00:00.000Z' });
+    await carts.insertOne({ ...original, id: 'foreign-active', customerSub: 'another-owner', updatedAt: '2099-03-01T00:00:00.000Z' });
+    const result = await gql(CUSTOMER_OFFER);
+    expect(result.errors).toBeUndefined();
+    expect(result.data.wkndCustomerRecoveryOffer.cart_id).toBe('newest-owned');
+    expect(await customerCartId()).toBe('newest-owned');
+    await carts.updateOne({ id: 'newest-owned' }, { $set: { status: 'ordered' } });
+    await carts.updateOne({ id }, { $set: { status: 'merged' } });
+    expect((await gql(CUSTOMER_OFFER)).data.wkndCustomerRecoveryOffer).toBeNull();
+  });
+
+  test('customer recovery returns the evaluated item/coupon snapshot without cart, inactivity, claim or order writes', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await gql(APPLY, { id, code: 'WKND10' });
+    const previousActivity = new Date(Date.now() - HOUR).toISOString();
+    await store.collection('carts').updateOne({ id }, {
+      $unset: { activityAt: '' }, $set: { updatedAt: previousActivity, stagePlannerPricing: 'old-fingerprint' },
+    });
+    const before = await store.collection('carts').findOne({ id });
+    const writes = ['carts', 'recovery_entitlements', 'recovery_redemptions', 'orders'].flatMap((name) => {
+      const collection = store.collection(name);
+      return ['insertOne', 'updateOne', 'replaceOne', 'deleteMany'].map((method) => jest.spyOn(collection, method));
+    });
+    const result = await gql(CUSTOMER_OFFER, {}, { namespace: '28538-wkndcommerce-stage' });
+    expect(result.errors).toBeUndefined();
+    expect(result.data.wkndCustomerRecoveryOffer).toMatchObject({
+      cart_id: id, cart_version: `v${before.revision || 0}`,
+      items: before.items.map(({ uid, quantity }) => ({ uid, quantity })),
+      applied_coupon_codes: ['WKND10'],
+      offer: { status: 'ELIGIBLE', coupon_code: 'RECOVER10', current_saving: { currency: 'AUD' } },
+    });
+    expect(result.data.wkndCustomerRecoveryOffer.offer.current_saving.value).toBeGreaterThan(0);
+    expect(await store.collection('carts').findOne({ id })).toEqual(before);
+    writes.forEach((write) => expect(write).not.toHaveBeenCalled());
+  });
+
+  test('customer recovery snapshots change after an edit and disabled offers are rechecked on the next request', async () => {
+    const id = await customerCartId();
+    await gql(ADD, { id, sku: pricey.sku, qty: 1 });
+    await age(id, 1);
+    const first = (await gql(CUSTOMER_OFFER)).data.wkndCustomerRecoveryOffer;
+    expect(first.offer.status).toBe('ELIGIBLE');
+    await gql(`mutation($id:String!,$uid:ID!){
+      updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:2}]}){cart{id}}
+    }`, { id, uid: first.items[0].uid });
+    const next = (await gql(CUSTOMER_OFFER)).data.wkndCustomerRecoveryOffer;
+    expect(next.items[0].quantity).toBe(2);
+    expect(next.cart_version).not.toBe(first.cart_version);
+    expect(next.offer).toMatchObject({ status: 'INELIGIBLE', reason: 'NOT_IN_RECOVERY_WINDOW' });
+    expect(first.items[0].quantity).toBe(1);
+    await age(id, 1);
+    await store.collection('promotions').updateOne({ id: RID }, { $set: { enabled: false } });
+    expect((await gql(CUSTOMER_OFFER)).data.wkndCustomerRecoveryOffer.offer.status).toBe('UNAVAILABLE');
   });
 
   test('legacy inactivity survives a customerCart planner metadata write, while quantity edits reset it', async () => {

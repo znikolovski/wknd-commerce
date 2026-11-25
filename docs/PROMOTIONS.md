@@ -583,6 +583,14 @@ Read-only offer display reuses only the candidate validated by that same request
 Current cart coupons retain normal fresh trust and pricing evaluation; claim/apply paths do not
 use this display shortcut. No candidate, financial record or eligibility decision is cached
 between requests.
+`wkndCustomerRecoveryOffer` is an authenticated, read-only, no-argument alternative for starting
+recovery evaluation alongside initial `customerCart` loading. It selects the same newest active
+owned cart, but returns null rather than creating one if none exists. The response includes
+`cart_id`, `cart_version`, `items { uid quantity }`, `applied_coupon_codes` and the existing
+`offer: WkndRecoveryOffer` payload, evaluated against that exact snapshot. It never shapes/saves
+the cart, changes inactivity, claims an entitlement or places an order. Consumers must withhold
+the offer until their current cart matches the snapshot, and discard/recheck after an edit,
+cart replacement or sign-out. Existing cart-ID recovery queries and financial mutations are unchanged.
 Cart/customer-cart reads and item add/remove start cart-independent migration/automatic-definition
 reads alongside the cart lookup. Cart ownership/not-found errors retain priority if both reads
 fail; definition failures remain explicit. Source reads stay request-owned and are refreshed after

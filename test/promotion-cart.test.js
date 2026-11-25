@@ -142,6 +142,40 @@ beforeEach(async () => {
   await importCatalog(store, CATALOG, { replace: true });
 });
 
+test('quantity CAS retry discards scoped stock reads and revalidates the latest inventory', async () => {
+  const id = await customerCartId();
+  await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+  const cart = await store.collection('carts').findOne({ id });
+  const carts = store.collection('carts');
+  const replace = carts.replaceOne.bind(carts);
+  jest.spyOn(carts, 'replaceOne').mockImplementationOnce(async (filter, next) => {
+    await store.collection('inventory').updateOne({ sku: cheap.sku }, { $set: { qty: 2 } });
+    await carts.updateOne({ id }, { $inc: { revision: 1 } });
+    return replace(filter, next);
+  });
+  const result = await gql(`mutation($id:String!,$uid:ID!){
+    updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:3}]}){
+      cart{total_quantity} errors{code}
+    }}`, { id, uid: cart.items[0].uid });
+  expect(result.errors).toBeUndefined();
+  expect(result.data.updateCartItems).toMatchObject({
+    cart: { total_quantity: 2 }, errors: [{ code: 'INSUFFICIENT_STOCK' }],
+  });
+});
+
+test('quantity zero can still remove a now-disabled product without using stale financial facts', async () => {
+  const id = await customerCartId();
+  await gql(ADD, { id, sku: cheap.sku, qty: 1 });
+  const cart = await store.collection('carts').findOne({ id });
+  await store.collection('products').updateOne({ sku: cheap.sku }, { $set: { status: 'disabled' } });
+  const result = await gql(`mutation($id:String!,$uid:ID!){
+    updateCartItems(input:{cart_id:$id,cart_items:[{cart_item_uid:$uid,quantity:0}]}){
+      cart{total_quantity} errors{code}
+    }}`, { id, uid: cart.items[0].uid });
+  expect(result.errors).toBeUndefined();
+  expect(result.data.updateCartItems).toMatchObject({ cart: { total_quantity: 0 }, errors: [] });
+});
+
 test.each(['placeOrder', 'setPaymentMethodAndPlaceOrder'])('bundle attribution persists through %s using fresh exact-variant prices', async (operation) => {
   await migrateLegacyPromotions(store);
   const cat = await loadCatalog(store);

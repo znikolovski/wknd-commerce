@@ -42,6 +42,14 @@ fresh reads bypass the cache and never fall back to an older snapshot.
 This replaces the five-collection database waterfall with overlapping reads without relaxing price,
 stock, promotion, consent or cart-revision checks. Personalized cart responses
 remain `no-store`; no customer or offer-eligibility cache is introduced.
+Bundle-enabled cart evaluation refreshes product parents, prices and inventory for
+every cart SKU and every enabled bundle component, including current sibling variants
+used by displayed product price ranges. Filtered reads retain count verification and
+incomplete-read retries; missing current cart financial records fail closed.
+Reads may be shared only inside the same request and are discarded on cart CAS retries.
+Categories and images come from the structural catalog snapshot,
+not a second full financial reload. Targeted snapshots are never cached between
+requests.
 
 ## Setup
 

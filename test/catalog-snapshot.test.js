@@ -3,7 +3,7 @@ const path = require('node:path');
 const { createMemoryStore } = require('../lib/store');
 const { importCatalog } = require('../lib/importer');
 const {
-  loadCatalog, resetCatalogCache, priceFor, IncompleteReadError,
+  loadCatalog, loadFinancialCatalog, resetCatalogCache, priceFor, stockFor, IncompleteReadError,
 } = require('../lib/catalog');
 
 const CATALOG = JSON.parse(fs.readFileSync(path.join(__dirname, '../data/catalog.json'), 'utf8'));
@@ -127,4 +127,83 @@ test('fresh snapshots overlap independent collection reads without bypassing com
   const cat = await loading;
   expect(priceFor(cat, SKU).regular).toBeGreaterThan(0);
   expect(cat.priceBySku.size).toBe(CATALOG.prices.length);
+});
+
+test('financial reads refresh only scoped parents, prices and stock without changing the cached catalog', async () => {
+  const cat = await loadCatalog(store);
+  const reads = [];
+  const scoped = {
+    ...store,
+    collection(name) {
+      const coll = store.collection(name);
+      return {
+        findOne: (filter) => {
+          reads.push({ name, filter });
+          return coll.findOne(filter);
+        },
+      };
+    },
+  };
+  await store.collection('prices').updateOne({ sku: SKU }, { $set: { regular: 123.45, special: null } });
+  await store.collection('inventory').updateOne({ sku: SKU }, { $set: { qty: 2 } });
+  const fresh = await loadFinancialCatalog(scoped, cat, [SKU]);
+  expect(reads).toEqual(['products', 'prices', 'inventory'].map((name) => ({
+    name, filter: { sku: SKU },
+  })));
+  expect(priceFor(fresh, SKU).final).toBe(123.45);
+  expect(stockFor(fresh, SKU).qty).toBe(2);
+  expect(await loadCatalog(store)).toBe(cat);
+  expect(priceFor(cat, SKU).final).not.toBe(123.45);
+});
+
+test.each(['disabled-parent', 'disabled-variant', 'removed-variant', 'missing-price', 'missing-stock', 'wrong-currency'])(
+  'required financial records fail closed on %s despite a warm snapshot',
+  async (change) => {
+    const parent = CATALOG.products.find((p) => p.type === 'configurable');
+    const sku = parent.variants[0].sku;
+    const cat = await loadCatalog(store);
+    if (change === 'disabled-parent') await store.collection('products').updateOne({ sku: parent.sku }, { $set: { status: 'disabled' } });
+    if (change === 'disabled-variant') await store.collection('products').updateOne({ sku: parent.sku }, {
+      $set: { variants: parent.variants.map((v) => ({ ...v, status: 'disabled' })) },
+    });
+    if (change === 'removed-variant') await store.collection('products').updateOne({ sku: parent.sku }, { $set: { variants: [] } });
+    if (change === 'missing-price') {
+      await store.collection('prices').deleteOne({ sku });
+      await store.collection('prices').deleteOne({ sku: parent.sku });
+    }
+    if (change === 'missing-stock') await store.collection('inventory').deleteOne({ sku });
+    if (change === 'wrong-currency') await store.collection('prices').updateOne({ sku }, { $set: { currency: 'USD' } });
+    await expect(loadFinancialCatalog(store, cat, [sku])).rejects.toBeInstanceOf(IncompleteReadError);
+  },
+);
+
+test('filtered cursor incompleteness is retried without using warm financial data', async () => {
+  const cat = await loadCatalog(store);
+  const find = jest.fn(async () => []);
+  const incomplete = {
+    ...store,
+    collection(name) {
+      const coll = store.collection(name);
+      return name === 'prices' ? { find, countDocuments: (filter) => coll.countDocuments(filter) } : coll;
+    },
+  };
+  const skus = CATALOG.products.filter((p) => p.type === 'simple').slice(0, 4).map((p) => p.sku);
+  await expect(loadFinancialCatalog(incomplete, cat, skus)).rejects.toBeInstanceOf(IncompleteReadError);
+  expect(find).toHaveBeenCalledTimes(3);
+});
+
+test('request-scoped reuse coalesces records, but a new request observes changed financial facts', async () => {
+  const cat = await loadCatalog(store);
+  const prices = store.collection('prices');
+  const find = jest.spyOn(prices, 'findOne');
+  const request = new Map();
+  await Promise.all([
+    loadFinancialCatalog(store, cat, [SKU], [SKU], request),
+    loadFinancialCatalog(store, cat, [SKU], [SKU], request),
+  ]);
+  expect(find).toHaveBeenCalledTimes(1);
+  await prices.updateOne({ sku: SKU }, { $set: { regular: 111, special: null } });
+  const nextRequest = await loadFinancialCatalog(store, cat, [SKU]);
+  expect(priceFor(nextRequest, SKU).final).toBe(111);
+  expect(find).toHaveBeenCalledTimes(2);
 });

@@ -58,6 +58,14 @@ Categories and images come from the structural catalog snapshot,
 not a second full financial reload. Targeted snapshots are never cached between
 requests.
 
+Claimed protected-Aero kits can also complete from an empty cart through
+`completeWkndBundle`, supporting the LLM app's explicit **Add kit to cart**
+button. Ordinary automatic bundle offers still require a partial kit.
+This changes only the initial-quantity condition: verified booking entitlement,
+fresh stock/prices, exact components, one winning discount and atomic
+cart-revision checks remain required. No entitlement, booking or order is
+created by reading a completion offer.
+
 ## Setup
 
 1. `aio app use` (Console project `wkndcommerce`, Stage workspace). Then copy `.env.example` to `.env`

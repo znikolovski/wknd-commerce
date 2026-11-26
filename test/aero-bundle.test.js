@@ -170,10 +170,10 @@ test('booking revocation, spent grants and insufficient current kit stock remove
   expect(computeTotals(rt.catalogSnapshot, cart, rt).promotion.selected?.managementClass).not.toBe(MANAGEMENT_CLASS);
 });
 
-test('claimed kit participates in the existing reviewed atomic bundle completion with one cart CAS', async () => {
+test.each([false, true])('claimed kit completes with one cart CAS, including an empty cart: %s', async (empty) => {
   await service.offer(CUSTOMER, BOOKING, { claim: true });
   let cart = await createCart(store, { customerSub: CUSTOMER.sub });
-  addItem(cat, cart, { sku: COMPONENTS[0].sku, quantity: 1 });
+  if (!empty) addItem(cat, cart, { sku: COMPONENTS[0].sku, quantity: 1 });
   cart = await saveCart(store, cart);
   const offers = await execute('query($id:String!){wkndBundleOffers(cart_id:$id){promotion_id bundle_id cart_version}}', { id: cart.id });
   expect(offers.body.errors).toBeUndefined();
@@ -194,6 +194,17 @@ test('claimed kit participates in the existing reviewed atomic bundle completion
   expect(completed.body.data.completeWkndBundle).toEqual({
     cart: { total_quantity: 3, wknd_cart_version: `v${cart.revision + 1}` }, user_errors: [],
   });
+  const saved = await store.collection('carts').findOne({ id: cart.id });
+  expect(saved.items.map(({ sku, quantity }) => ({ sku, quantity })).sort((a, b) => a.sku.localeCompare(b.sku)))
+    .toEqual(COMPONENTS.map(({ sku, quantity }) => ({ sku, quantity })).sort((a, b) => a.sku.localeCompare(b.sku)));
+  const rt = await runtime(saved);
+  const totals = computeTotals(rt.catalogSnapshot, saved, rt);
+  const kitMinor = COMPONENTS.reduce((sum, component) => sum + Math.round(priceFor(rt.catalogSnapshot, component.sku).final * 100), 0);
+  expect(totals.discountTotal).toBe(Math.round(kitMinor / 2) / 100);
+  expect(totals.promotion.selected.managementClass).toBe(MANAGEMENT_CLASS);
+  const repeated = await execute(complete, { ...variables, version: `v${saved.revision}` });
+  expect(repeated.body.errors).toBeDefined();
+  expect(await store.collection('carts').findOne({ id: cart.id })).toEqual(saved);
   expect(await store.collection('aero_bundle_redemptions').countDocuments({})).toBe(0);
 });
 

@@ -54,9 +54,29 @@ withdrawal is naturally idempotent and never grants consent. Withdrawal returns
 `binding:null`, `revoked:true`, `upstreamDeletionConfirmed:false`; no AAM deletion,
 membership migration or device reset is claimed.
 
-When explicitly approved, Target binding uses this same mapping as its declared
-ID. Existing raw-sub bindings are retained as retirement-pending, never silently
-relinked or claimed migrated. The AAM collection adapter and canonical semantic
+When explicitly approved, both the direct Target diagnostic and the Commerce
+Planner provider use this same mapping as the ID Service declared ID and Target
+`customerIds` value. There is no raw-sub fallback when alias approval is ON.
+
+Production supports a narrow, same-consent-generation identity transition:
+an owned, server-issued legacy binding already retained with
+`retirement.reason='identity-mapping-changed'` may be left intact while a separate
+alias-scoped binding is issued in `target_id_bindings_v2`. The alias-scoped key is
+stable across consent generations. The old MID is never reused, deleted, opted out
+or reported as migrated upstream. Withdrawal, uncertain issuance, other grants,
+foreign/unknown records, an already-retiring alias and any retirement submission
+or observation still block issuance. Stage does not enable this transition.
+Delegated Commerce reads may reuse the resulting binding but cannot issue or
+relink it; they also cannot create a person alias.
+
+All alias-scoped records retain the original subject hash and shopper key, so
+the existing generation-scoped withdrawal scan retires them alongside legacy
+records. A new consent generation cannot bypass a pending alias retirement.
+The existing explicit retirement operation still addresses the legacy shopper-key
+record; alias-scoped retirement evidence remains retained for the separately
+approved upstream lifecycle workflow. No retirement-release worker is enabled.
+
+The AAM collection adapter and canonical semantic
 rule mappings are **missing**: `person-event` returns 503
 `canonical-rule-unavailable`; no semantic names or args are approved.
 Neither navigation nor quiz completion is rewritten as a page view.

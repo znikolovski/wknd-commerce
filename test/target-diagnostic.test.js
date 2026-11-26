@@ -65,6 +65,21 @@ describe('Target AAM diagnostic: configuration gate', () => {
 });
 
 describe('Target AAM diagnostic: identity trust', () => {
+  test('approved alias delivery uses only the server-confirmed alias, never a raw-sub fallback', async () => {
+    const alias = `wpa_${'a'.repeat(32)}`;
+    const fetchImpl = fakeFetch(delivery([offer('climbing-planner')]));
+    const params = { ...PARAMS, TARGET_PERSON_ALIAS_APPROVED: 'true' };
+    expect(await run({ params, bindingProvider: provider({ ...BINDING, declaredId: alias }), fetchImpl }))
+      .toMatchObject({ status: 'decided', marker: 'climbing-planner' });
+    const sent = JSON.parse(fetchImpl.mock.calls[0][1].body);
+    expect(sent.id.customerIds[0].id).toBe(alias);
+    expect(JSON.stringify(sent)).not.toContain(SUB);
+    fetchImpl.mockClear();
+    expect(await run({ params, bindingProvider: provider(), fetchImpl }))
+      .toMatchObject({ status: 'unavailable', reason: 'no-trusted-binding' });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   test('without a verified sub the result is unauthenticated', async () => {
     expect((await run({ claims: undefined })).reason).toBe('unauthenticated');
     expect((await run({ claims: { sub: ' ' } })).reason).toBe('unauthenticated');

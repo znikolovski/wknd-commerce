@@ -69,6 +69,67 @@ const resolveA = (p) => p.resolve({ shopperKey: KEY, sub: SUB });
 const un = (reason) => ({ source: 'unavailable', reason });
 const SUBJECT = crypto.createHash('sha256').update(SUB, 'utf8').digest('hex');
 
+describe('approved person-alias identity transition', () => {
+  const ALIAS = `wpa_${'a'.repeat(32)}`;
+  const aliasBinding = { personAlias: ALIAS, consentGeneration: GRANTED.grantId };
+  const source = () => ({
+    resolve: jest.fn(async () => ({ binding: aliasBinding })),
+    confirm: jest.fn(async ({ binding }) => binding === aliasBinding),
+  });
+  async function legacyFixture(change = {}, deps = {}) {
+    const store = memoryStore();
+    await store.put(KEY, {
+      state: 'retiring', shopperKey: KEY, subject: SUBJECT, orgId: ORG, dpid: DPID,
+      ecidSource: 'server-issued', ecid: ECID_A, consentGrantId: GRANTED.grantId,
+      retirement: { state: 'pending', reason: 'identity-mapping-changed' }, ...change,
+    }, { ifMatch: null });
+    return provider({
+      store, fetchImpl: fetchJson(idResponse({ d_mid: ECID_B })),
+      deps: { personAlias: source(), allowAliasMigration: true, ...deps },
+    });
+  }
+
+  test('same-grant legacy transition keeps retirement evidence intact and links only the canonical alias', async () => {
+    const h = await legacyFixture();
+    const retained = await h.store.get(KEY);
+    const binding = await resolveA(h.p);
+    expect(binding).toMatchObject({ source: 'server-issued', ecid: ECID_B, declaredId: ALIAS });
+    expect(await h.store.get(KEY)).toEqual(retained);
+    expect(dMid(h.fetchImpl, 1)).toBe(ECID_B);
+    expect(new URL(h.fetchImpl.mock.calls[1][0]).searchParams.get('d_cid')).toBe(`${DPID}\u0001${ALIAS}\u00011`);
+    expect(await h.p.confirm({ shopperKey: KEY, sub: SUB, binding })).toBe(true);
+    expect(await resolveA(h.p)).toEqual(binding);
+    expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+    expect(await h.p.confirm({ shopperKey: KEY, sub: SUB, binding: { ...binding, declaredId: `wpa_${'b'.repeat(32)}` } })).toBe(false);
+  });
+
+  test.each([
+    ['migration disabled', {}, { allowAliasMigration: false }],
+    ['different consent generation', { consentGrantId: 'older-grant' }, {}],
+    ['withdrawal', { retirement: { state: 'pending', reason: 'consent-withdrawn' } }, {}],
+    ['uncertain issuance', { retirement: { state: 'pending', reason: 'issuance-uncertain' } }, {}],
+    ['already submitted opt-out', { retirement: { state: 'pending', reason: 'identity-mapping-changed', submission: { state: 'submitted' } } }, {}],
+    ['same alias already retiring', { declaredId: ALIAS }, {}],
+    ['unverified provenance', { ecidSource: undefined }, {}],
+  ])('%s never releases retirement or starts another linked identity', async (_, change, deps) => {
+    const h = await legacyFixture(change, deps);
+    const retained = await h.store.get(KEY);
+    expect(await resolveA(h.p)).toEqual(un('retirement-pending'));
+    expect(h.fetchImpl).not.toHaveBeenCalled();
+    expect(await h.store.get(KEY)).toEqual(retained);
+  });
+
+  test('ambiguous alias linkage stays pending and cannot be reminted by another migration attempt', async () => {
+    const h = await legacyFixture();
+    h.fetchImpl.mockImplementationOnce(async () => ({ ok: true, json: async () => idResponse({ d_mid: ECID_B }) }))
+      .mockImplementationOnce(async () => { throw new Error('link response lost'); });
+    expect(await resolveA(h.p)).toEqual(un('id-service-unreachable'));
+    expect(await resolveA(h.p)).toEqual(un('retirement-pending'));
+    expect(h.fetchImpl).toHaveBeenCalledTimes(2);
+    expect(h.store.data.size).toBe(2);
+  });
+});
+
 describe('ID Service request (documented direct integration)', () => {
   test('sends only org, version, optional stored ECID and the declared authenticated ID', () => {
     const url = new URL(idServiceUrl({

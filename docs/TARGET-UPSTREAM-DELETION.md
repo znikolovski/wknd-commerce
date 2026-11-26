@@ -34,6 +34,12 @@ Local lifecycle containment now works as follows:
 3. Reconsent never discards old pending work or reuses its ID. The provider returns
    `retirement-pending` until a supported retirement/release workflow exists. Local consent status
    may be granted while linking is still unavailable. Do not delete the pending record to unblock it.
+   This is distinct from the approved Production identity transition described in
+   [the diagnostic contract](TARGET-AAM-DIAGNOSTIC.md): a same-grant legacy
+   `identity-mapping-changed` record with verified server provenance and no
+   submission/observation remains untouched while a separate canonical-alias
+   binding is issued. That transition does not release retirement, reuse the old
+   MID or apply to consent withdrawal, uncertain issuance or another grant.
 4. The OFF-by-default authenticated operation `{op:'retirement',step:'submit'|'observe'}` uses only
    the verified shopper's persisted server-issued retiring MID. A scoped CAS sending claim is saved
    before any request; timeout/crash/unknown response retains identifiers and an unknown outcome.

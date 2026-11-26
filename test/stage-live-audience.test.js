@@ -4,6 +4,8 @@ const { createStageLiveAudienceProvider } = require('../lib/stage-live-audience'
 const { shopperKey } = require('../lib/recovery-policy');
 const { sha256 } = require('../lib/promotion-schema');
 const { MBOX, PRODUCTION_MBOX, REQUEST_SCHEMA } = require('../lib/target-diagnostic');
+const { createPersonAliasSource } = require('../lib/person-alias');
+const { removeBindingsForSubject } = require('../lib/target-binding-store');
 
 const SUB = 'auth0|synthetic-stage-demo';
 const ISSUER = 'https://example.auth0.com/';
@@ -65,6 +67,54 @@ test('explicit Production demo uses its own namespace/mbox/environment and rejec
   } });
   expect(await wrong.provider.resolve({ customer: { sub: SUB }, registryKey: mapping['climbing-planner'] }))
     .toMatchObject({ status: 'unknown' });
+});
+
+test('Production planner and delegated cart reads share the confirmed alias while preserving the legacy MID', async () => {
+  const config = {
+    ...params, TARGET_DIAG_ENVIRONMENT: 'production',
+    TARGET_DIAG_PRODUCTION_NAMESPACE: '28538-wkndcommerce', __OW_NAMESPACE: '28538-wkndcommerce',
+    TARGET_DIAG_TARGET_CONFIG_APPROVED: 'true', TARGET_PERSON_ALIAS_APPROVED: 'true',
+    TARGET_ID_ORG_ID: '28260E2056581D3B7F000101@AdobeOrg',
+  };
+  const store = createMemoryStore();
+  await store.collection('customers').insertOne({ sub: SUB, idLinkage: { state: 'granted', grantId: GRANT } });
+  const aliases = createPersonAliasSource(store, config, { now: () => T0 });
+  const { binding: alias } = await aliases.resolve({ sub: SUB });
+  const bindings = createBindingStore(store);
+  await bindings.put(KEY, {
+    state: 'retiring', shopperKey: KEY, subject: sha256(SUB), orgId: config.TARGET_ID_ORG_ID,
+    dpid: config.TARGET_ID_DPID, ecid: '1'.repeat(38), ecidSource: 'server-issued',
+    consentGrantId: GRANT, retirement: { state: 'pending', reason: 'identity-mapping-changed' },
+  }, { ifMatch: null });
+  const retained = await bindings.get(KEY);
+  const fetchImpl = jest.fn(async (url) => ({
+    ok: true,
+    json: async () => (new URL(url).hostname === 'dpm.demdex.net'
+      ? { d_mid: '2'.repeat(38), dcs_region: 9, id_sync_ttl: 604800, d_blob: 'new-alias-blob' }
+      : { execute: { mboxes: [{ name: PRODUCTION_MBOX, options: [{
+        type: 'json', content: { schema: REQUEST_SCHEMA, environment: 'production', marker: 'climbing-planner', financialAuthorization: false },
+      }] }] } }),
+  }));
+  const providerFor = () => createStageLiveAudienceProvider({
+    params: config, store, fetchImpl, registryKeysByMarker: mapping,
+    now: () => T0, namespace: config.__OW_NAMESPACE, productionDemo: true,
+  });
+  const request = { customer: { sub: SUB }, registryKey: mapping['climbing-planner'] };
+  expect(await providerFor().resolve(request)).toMatchObject({ status: 'member' });
+  expect(await bindings.get(KEY)).toEqual(retained);
+  const targetCalls = fetchImpl.mock.calls.filter(([url]) => new URL(url).hostname.endsWith('.tt.omtrdc.net'));
+  expect(JSON.parse(targetCalls[0][1].body).id.customerIds[0].id).toBe(alias.personAlias);
+  expect(fetchImpl).toHaveBeenCalledTimes(3);
+  expect(await providerFor().resolve({ ...request, customer: { sub: SUB, delegated: true } }))
+    .toMatchObject({ status: 'member' });
+  expect(fetchImpl).toHaveBeenCalledTimes(4);
+  expect((await store.collection('customers').findOne({ sub: SUB })).idLinkage.grantId).toBe(GRANT);
+  await store.collection('customers').updateOne({ sub: SUB }, { $set: { 'idLinkage.state': 'withdrawn' } });
+  await removeBindingsForSubject(store, sha256(SUB), { grantId: GRANT });
+  expect((await store.collection('target_id_bindings_v2').find({ 'record.subject': sha256(SUB) }))
+    .every(({ record }) => record.state === 'retiring')).toBe(true);
+  expect(await providerFor().resolve(request)).toMatchObject({ status: 'unknown' });
+  expect(fetchImpl).toHaveBeenCalledTimes(4);
 });
 
 test.each(['climbing-planner', 'climbing-interest'])('maps only canonical %s to its server-owned registry key', async (marker) => {
